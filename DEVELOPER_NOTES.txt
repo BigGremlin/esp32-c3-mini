@@ -328,5 +328,95 @@ Since both existing changesets are clean, general bug fixes (not personal-only h
 their own topic branch off `main` and were committed there (`fix/axp2101-battery-read` = `00a1022`,
 `fix/1167-410-battery-digit` = `e7ac3b1`), then merged into a new `gremlinDev` branch
 (merge commit `3c9ecfc`) alongside this notes file. `main` itself remains untouched at `888f308`
-(no local commits on it). Neither fix branch has been pushed to `origin` or PR'd yet — that's the
-next step whenever the user's ready to open the upstream PRs.
+(no local commits on it).
+
+Update same day: both branches pushed to `origin` and PR'd against `fbiego/esp32-c3-mini` —
+https://github.com/fbiego/esp32-c3-mini/pull/45 (AXP2101 battery) and
+https://github.com/fbiego/esp32-c3-mini/pull/46 (1167_410 digit fix). Pushing needed
+`git -c credential.helper='!gh auth git-credential' push ...` since plain `git push` has no
+credential source configured and `gh auth setup-git` would have written to git config (avoided
+per standing instruction not to touch git config beyond what's explicitly asked for).
+
+
+2026-07-13 (continued) — New experimental analog face for this board: ported "75_2" (Analog, 240x240) to 410x410 — WORKING, gremlinDev only, not upstream material
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+User wanted an analog watchface (rotating hands, not a digit-image digital face like all six
+faces already enabled for ESPS3_2_06 — see the 1167_410 entry above). None of the five real faces
+on this board are analog (confirmed by grepping every `update_status_*_410` for
+`lv_image_set_rotation` — zero hits across all five). The repo does have real analog designs (e.g.
+`75_2`, registers as "Analog", genuine hour/minute/second hand rotation), but only pre-converted
+for other resolutions (240x240, round 466x466) — nothing at 410-wide for this screen.
+
+Tooling set up (none of this existed on the machine before):
+- Cloned `fbiego/esp32-lvgl-watchface` (the actual bin2lvgl converter, `src/faces/bin2lvgl.jar` —
+  prebuilt, no need for `kotlinc`) and `fbiego/watch-face-wearfit` (the `.bin` dial pool + a
+  `resizer.pyc`/`imager.jar`/`watchface.jar` toolset) to `~/esp32-lvgl-watchface` and
+  `~/watch-face-wearfit` (plain clones, not forks — these are tools we consume, not projects we're
+  contributing to).
+- `bin2lvgl.jar` needs a JRE; none was installed. Got one with zero sudo via the `install-jdk` pip
+  package: `pip3 install --user --break-system-packages install-jdk` then
+  `python3 -c "import jdk; jdk.install('17')"` → installed to `~/.jdk/jdk-17.0.19+10`.
+- `watch-face-wearfit/tools/resizer.pyc` needs Python 3.11 specifically (bytecode magic-number
+  mismatch against the system's 3.14) and Pillow. Got Python 3.11 with zero sudo via `uv`
+  (installed via `pip3 install --user --break-system-packages uv`, then
+  `uv python install 3.11`), then `uv venv --python 3.11 .venv` + `uv pip install Pillow` inside
+  `watch-face-wearfit/tools/` for a self-contained interpreter with Pillow available.
+- **`resizer.pyc` turned out to be a dead end**: despite the README documenting
+  `py resizer.pyc watchface.bin 240 360` (from-size, to-size args) and the tool printing a
+  "AxA >> BxB" banner reflecting whatever's typed, the actual resize target is hardcoded — same
+  output file (byte-identical size) regardless of what width arguments were passed. Confirmed via
+  `strings resizer.pyc`: the banner text is a literal constant, not built from argv. Do not trust
+  this tool's documented interface; if a real fix is ever wanted, decompiling the bytecode (no
+  `.py` source ships in the repo) would be the only path, or just keep using the approach below.
+
+Actual approach used (bypasses resizer.pyc and the proprietary `.bin` dial format entirely):
+run `bin2lvgl.jar` once on the 240x240 source `.bin` to confirm/inspect structure, but the real
+source of truth was chronos-watch's own already-converted `src/faces/75_2/assets/*.c` — decode
+those LVGL C image arrays directly back to pixel data, scale with Pillow, re-encode to the same
+LVGL C format. New helper module: `tools/facegen/lvgl_img.py` (decode/encode/format functions),
+driver script `tools/facegen/gen_75_2_410.py` (scales 75_2 → 75_2_410 specifically; adjust the
+`SRC_DIR`/`OLD`/`NEW`/target-width constants at the top to reuse for a different source face or
+target resolution).
+
+**Two real format gotchas hit and fixed, worth knowing before touching these asset files again:**
+1. `.header.always_zero = 0,` vs `.header.magic = LV_IMAGE_HEADER_MAGIC,` — bin2lvgl emits
+   different header-field names across files/versions (even inconsistently within the same
+   `75_2` face — the alpha-less background asset used `magic`, the alpha-bearing hand/text assets
+   used `always_zero`). This project's pinned LVGL (9.3.0) only has `magic` on
+   `lv_image_header_t` — `always_zero` doesn't exist and fails to compile. This never surfaced
+   before because `75_2` was never enabled on any board that actually got built (its
+   `ENABLE_FACE_75_2` guard was never defined for `ESPS3_2_06`) — first time enabling it here is
+   what exposed the latent bug. Fix: always emit `.header.magic = LV_IMAGE_HEADER_MAGIC,`.
+2. **Pixel data layout is planar, not interleaved.** For `LV_COLOR_FORMAT_NATIVE_WITH_ALPHA`
+   (RGB565 + alpha), the byte array is NOT `[R,G,alpha, R,G,alpha, ...]` per pixel — it's all
+   `w*h*2` RGB565 color bytes first, THEN all `w*h` alpha bytes after (confirmed by exact byte
+   count: a 10x66 image is 1980 bytes = 660*2 (color) + 660*1 (alpha), not divisible cleanly any
+   other sensible way). Decoding as interleaved-per-pixel produces a subtly-broken image where
+   most fully-opaque regions look fine (background, solid fills) but anything with real alpha
+   transitions — edges, thin strokes, text — comes out as scattered colour speckling, because
+   each "pixel" read is actually built from bytes belonging to 1-2 *different* real pixels plus a
+   stray alpha byte. This is exactly what the user saw on the first flash (hands + weekday text
+   speckled, solid background fine) and initially misdiagnosed as a resize-filter ringing problem
+   (tried LANCZOS→BICUBIC, tried adding alpha premultiplication — neither helped, because neither
+   was the actual bug). Confirmed by direct pixel inspection of a decoded-but-unscaled hand image
+   at 8x nearest-neighbour zoom — the speckling was present before any resize step ran at all,
+   which is what finally pointed at the decode step itself rather than the resize.
+
+Face itself: root object's black background is used for letterboxing — since 75_2 is a 240x240
+square design and this screen is 410x494 (not square), the scaled 410x410 result is vertically
+centered with a 42px black margin top and bottom (`Y_OFFSET = (494 - 410) / 2` in the script)
+rather than distorting it into an oval to fill the full height. All positions and hand pivot
+points scaled by the same 410/240 factor as the images themselves, so rotation stays correctly
+centered.
+
+Wired up ESPS3_2_06-only: `ENABLE_FACE_75_2_410` added to `hal/esp32/app_hal.h`'s `ESPS3_2_06`
+block, `init_face_75_2_410`/`update_check_75_2_410` added to `ui_watchfaces_init()`/
+`ui_update_watchfaces()` in `src/ui/ui.c`. New face lives at `src/faces/75_2_410/`. Builds clean,
+flashed, user confirmed hand rotation, letterboxing, and (after the planar-decode fix) the
+speckling are all good.
+
+**Deliberately NOT going to `fix/*` / upstream** — this is this-repo-specific tooling output
+(custom Python scripts, not bin2lvgl's own documented workflow, since that workflow's resize step
+turned out broken) and a hand-picked design decision (letterbox vs stretch) rather than a general
+bug fix. Belongs on `gremlinDev` only. Not yet committed as of writing this entry — see git log
+for whether that's since changed.
