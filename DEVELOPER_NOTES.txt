@@ -1,0 +1,332 @@
+chronos-watch — Developer Notes
+================================
+Purpose: running log of what was changed, why, and the exact commit(s)/actions involved.
+Keep entries in date order, newest at the bottom. Always cite commit hashes where applicable.
+
+
+2026-07-12 — Why this directory exists, and how the pieces fit together
+--------------------------------------------------------------------------
+This is a *different* project from the earlier ESP32 watch work (~/OLEDS3Watch-joaquim,
+based on joaquimorg/OLEDS3Watch). This one is built on fbiego's "Chronos" ecosystem,
+found and already flashed to the board via the Claude app before Claude Code got
+involved. Same class of hardware target (Waveshare ESP32-S3-Touch-AMOLED-2.06), but an
+unrelated upstream codebase — do not mix the two up, and do not port code between them
+without explicitly checking it makes sense for this firmware's architecture.
+
+~/chronos-watch is a `git clone` of a fork (github.com/BigGremlin/esp32-c3-mini) of
+https://github.com/fbiego/esp32-c3-mini — remotes: `origin` = the fork (push target),
+`upstream` = fbiego's original (pull target for updates, and PR target).
+
+This is THE FIRMWARE — the repo that actually builds and flashes to the watch. It's a
+multi-board codebase: one platformio.ini with ~20 [env:...] sections, one per supported
+board. Despite the repo being named after fbiego's original ESP32-C3 board, our board
+(Waveshare ESP32-S3-Touch-AMOLED-2.06, 410x502 display) is a later-added target:
+env:lolin_s3_2_06, board define ESPS3_2_06, extends the shared [esp32] section.
+IMPORTANT: platformio.ini's `default_envs` is currently set to `elecrow_c3_1_28`, NOT
+our board — any plain `pio run` without `-e lolin_s3_2_06` targets the wrong hardware.
+Not yet fixed/changed, just noting it so it isn't a surprise later.
+
+Related directories:
+- ~/chronos-esp32 — fork+clone of fbiego/chronos-esp32 (the ChronosESP32 BLE library:
+  notifications, weather, time sync, phone-battery relay via setBattery()). Same
+  origin/upstream remote pattern as chronos-watch. NOT currently wired into the
+  chronos-watch build — platformio.ini's `[esp32]` lib_deps pulls the PUBLISHED
+  registry package `fbiego/ChronosESP32@1.9.0`, entirely independent of this local
+  clone. If/when we need to patch the library itself, lib_deps will need to be
+  repointed at the local fork (e.g. a path/symlink override) — not done yet.
+- esp32-lvgl-watchface (bin2lvgl converter) and watch-face-wearfit (.bin dial pool) —
+  not yet forked/cloned. Offline tooling for generating new watch faces; output gets
+  dropped into chronos-watch/src/faces/ (existing faces there are named by pixel width,
+  e.g. 174_410, 1167_410, gated by ENABLE_FACE_* macros in hal/esp32/app_hal.h). Only
+  clone these when face-creation work actually starts.
+- lewisxhe/XPowersLib — AXP2101 PMU reference library. Not yet forked/cloned; relevant
+  only if/when real local battery-percentage hardware reading is added (see below —
+  currently this board doesn't seem to have that wired up at all).
+
+Local machine setup done this session: `gh` CLI installed (apt, already in Ubuntu 26.04
+universe), authed as GitHub user BigGremlin via `gh auth login` (device-code flow, since
+this machine is headless/SSH-accessed — browser auth happens on the connecting laptop,
+not locally). User explicitly declined passwordless/NOPASSWD sudo when offered; ran the
+one sudo install command themselves in a real terminal each time instead.
+
+PR workflow (not yet exercised end-to-end): branch off `main` in the relevant fork,
+commit, `git push -u origin <branch>`, then `gh pr create --repo fbiego/<repo>` to open
+against upstream.
+
+
+2026-07-12 — Battery-percentage: current state is a stub, not a real read
+------------------------------------------------------------------------------
+Checked hal/esp32/app_hal.cpp for how "battery" is handled on this board target.
+Found only two call sites: `watch.setBattery(lvl)` (line ~1367, driven by a debug
+slider — `ui_batterySlider` — in a settings/demo screen) and a hardcoded
+`watch.setBattery(85)` (line ~2004, looks like a startup default/placeholder). Neither
+reads real hardware. No AXP2101 or ADC-based battery code found anywhere in
+hal/esp32/ for ESPS3_2_06. So "the battery-percentage fix" isn't a bugfix to an
+existing read path — it's wiring up a genuine local battery reading for the first time
+on this board. XPowersLib (lewisxhe) is the likely reference for that once it starts.
+Not started yet.
+
+
+2026-07-12 (continued) — Battery-percentage: real AXP2101 read implemented, flashed, CONFIRMED working
+------------------------------------------------------------------------------------------------------
+Confirmed this board (Waveshare ESP32-S3-Touch-AMOLED-2.06, env:lolin_s3_2_06) is physically
+the same PCB as the OLEDS3Watch-joaquim project's board: cross-checked hal/esp32/displays/pins.h
+(LCD_CS=12, LCD_SCK=11, LCD_SD0-3=4/5/6/7, LCD_RST=8, TOUCH_RST=9, TOUCH_IRQ=38) against that
+project's known-good esp32_s3_touch_amoled_2_06.h BSP header — every pin number matches exactly,
+including the AXP2101 PMU's I2C bus (SDA=GPIO15, SCL=GPIO14 — same bus already used for touch in
+this codebase, shared, not a separate bus) and address (0x34).
+
+Implementation (all in hal/esp32/app_hal.cpp and platformio.ini, ESPS3_2_06-gated only, no other
+board touched):
+- platformio.ini, env:lolin_s3_2_06 lib_deps: added `lewisxhe/XPowersLib@0.3.3` (latest tagged
+  release at the time; the library's git HEAD is ahead as 0.3.4-dev with a reorganized header
+  layout — see gotcha below, don't assume HEAD's API/include-paths apply to the pinned version).
+- app_hal.cpp: `#define XPOWERS_CHIP_AXP2101` + `#include <XPowersLib.h>` + `XPowersAXP2101 PMU;`
+  global, declared right next to the existing `SensorPCF85063 rtc;` (same file, same pattern,
+  same shared I2C bus).
+- `PMU.init(Wire, TOUCH_SDA, TOUCH_SCL, AXP2101_SLAVE_ADDRESS)` called in hal_setup(), right after
+  the existing `rtc.begin(Wire)` block (reuses the bus `tft.init()` already brought up via the
+  touch driver — Wire.begin() with the same pins twice is safe/idempotent on ESP32 Arduino).
+  Replaces the hardcoded `watch.setBattery(85)` with a real `PMU.getBatteryPercent()` read,
+  passing `PMU.isCharging()` as the second arg (ChronosESP32's `setBattery(level, charging)`).
+- hal_loop(): added a 30s-interval re-poll (static `millis()`-gated, ESPS3_2_06-only block) that
+  re-reads and calls `watch.setBattery()` again, so the phone-visible battery % actually updates
+  over time instead of being fixed at the boot-time value.
+- Added a boot-time `Timber.i("AXP2101 battery: %d%%, charging: %d, vbus: %d", ...)` diagnostic
+  log (kept permanently, not just for this session's verification — matches the existing
+  Timber.e-on-failure convention for rtc.begin() right above it).
+
+Build-tooling gotchas hit and fixed this session (environment setup, not project bugs):
+- Ubuntu apt's `esptool` (4.7.0+dfsg) is missing stub-flasher binaries (see nvs-erase entry
+  above) — irrelevant for `pio run -t upload` since PlatformIO bundles its own working
+  `esptoolpy` package, but matters if ever driving esptool directly again; use `~/.local/bin/esptool`.
+- PlatformIO itself wasn't installed; installed via `pip3 install --user --break-system-packages
+  platformio` (PEP 668 override, `--user`-scoped only) to `~/.local/bin/pio`.
+- First build attempt failed: `python -c ...` in a build_flags backtick — this machine only has
+  `python3` on PATH, no bare `python`. Fixed with a user-scoped symlink: `ln -s $(which python3)
+  ~/.local/bin/python` (no sudo, `~/.local/bin` already ahead in PATH). This is a machine-level
+  gap, would need redoing on a fresh machine/laptop.
+- First code attempt used `#include <XPowersAXP2101.hpp>` directly (matches the library's current
+  git HEAD layout, which I'd cloned to a scratch dir to check the API) — but the pinned `0.3.3`
+  release still uses the old layout: `.tpp` files behind an umbrella `XPowersLib.h`, selected via
+  a `#define XPOWERS_CHIP_AXP2101` before including it. Fixed as described above. **Lesson: when
+  checking a dependency's API by cloning its repo, check out the actual pinned tag, not just
+  default-branch HEAD — they can differ.**
+- `src/common/generated_features.h` gets rewritten by the project's own pre-build script
+  (`support/header_gen.py`) on every `pio run`, and its include order isn't stable between runs
+  (looks like unsorted directory-listing order) — showed up as unrelated-looking diff noise after
+  building. Reverted with `git checkout -- src/common/generated_features.h` before considering the
+  working tree clean; do this after every local build, it's not a real change.
+
+Verified end-to-end: built clean (`pio run -e lolin_s3_2_06`), flashed via `pio run -e
+lolin_s3_2_06 -t upload --upload-port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_80:B5:4E:F3:30:F4-if00`,
+captured serial boot log, confirmed real reading: `AXP2101 battery: 100%, charging: 0, vbus: 1` —
+correct given the watch was on USB power with a full battery (not actively charging since already
+full, matches expected AXP2101 behaviour). Committed 2026-07-13 as `00a1022` on branch
+`fix/axp2101-battery-read` (see the 2026-07-13 branch-strategy entry below for why it isn't on
+`main`).
+
+Not yet done: BLE-paired verification (phone app showing the real %, not just the serial log);
+this was confirmed via serial diagnostic only. Also not yet tested: behaviour on battery power
+only (no VBUS), or mid-charge (0 < pct < 100, charging=1) — only the "full + plugged in" state was
+observed this session.
+
+
+2026-07-12 (continued) — Real battery now wired into watch faces + Settings display, flashed
+-------------------------------------------------------------------------------------------------
+User feedback after the first battery fix: two of the enabled watch faces show a battery
+indicator (`174_410`/`228_410`/`1167_410`/`2051_410`/`1041_410`/`2151_410` are the six faces
+enabled for this board via ENABLE_FACE_*_410 in hal/esp32/app_hal.h; confirmed by viewing each
+`watchface.png` preview that `1167_410` has a clear "battery %" bar/icon at top, and `2151_410`
+— the one with the large orange moon the user likes — also has a battery-driven element), and
+neither was showing anything real. Also: the "Battery" slider in Settings (`ui_batterySlider`,
+`ui_batteryPanel`/`ui_batteryLabel`) is user-draggable, which the user correctly flagged as wrong
+now that real battery hardware exists.
+
+Root cause for the faces: found a single shared code path, `update_faces()` in app_hal.cpp,
+computes one `battery` int for ALL watch faces via `watch.getPhoneBattery()` — i.e. every face's
+battery indicator was actually showing the *connected phone's* battery (relayed over BLE), never
+the watch's own. Confirmed via ChronosESP32 library header (`~/chronos-esp32/src/ChronosESP32.h`)
+that `_batteryLevel` (the watch's own, set via `setBattery()`) has NO public getter — only
+`_phoneBatteryLevel`/`getPhoneBattery()` is exposed — so faces structurally could not have shown
+the real value even if someone tried, the API doesn't support reading it back.
+
+Fix (all ESPS3_2_06-gated, no other board affected):
+- Added a global `int watchBatteryPercent = 100;` next to the `PMU` object — our own tracked
+  copy of the last good AXP2101 reading, updated by both the boot-time read and the 30s
+  `hal_loop()` poll (added in the previous entry).
+- `update_faces()`: `#if ESPS3_2_06` now sources `battery` from `watchBatteryPercent` instead of
+  `watch.getPhoneBattery()`; `#else` unchanged for every other board (still phone battery, as
+  originally designed there).
+- Settings slider: `lv_obj_remove_flag(ui_batterySlider, LV_OBJ_FLAG_CLICKABLE)` right after
+  `ui_init()` in hal_setup() (ESPS3_2_06-only) — stops it being draggable at all, without touching
+  the auto-generated `src/ui/ui.c`. Both the boot-time read and the 30s poll now also call
+  `lv_slider_set_value(ui_batterySlider, watchBatteryPercent, LV_ANIM_OFF)` and
+  `lv_label_set_text_fmt(ui_batteryLabel, "Battery %d%%", watchBatteryPercent)` directly — bypasses
+  needing to fire a synthetic LVGL VALUE_CHANGED event to get the "Battery NN%" label text to
+  update (that logic normally only runs from `ui_event_batterySlider`'s VALUE_CHANGED handler,
+  which itself only fires on user drag or an explicit `lv_event_send()`).
+- `onBatteryChange()`/`ui_event_batterySlider` (the old drag-to-fake-a-level handler) intentionally
+  left in place, untouched — now simply unreachable by touch since the slider isn't clickable, no
+  need to delete it (and it's still the correct/only behaviour on every other board, which don't
+  have a real PMU and still rely on this control to simulate a level for `getPhoneBattery()`-driven
+  face testing).
+
+Built clean, flashed, reconfirmed boot log still shows `AXP2101 battery: 100%, charging: 0,
+vbus: 1`. **Not yet visually confirmed on-device** that the moon face (2151_410), 1167_410, and
+the Settings screen actually render 100% correctly and that the slider truly can't be dragged —
+user is doing their own significant testing pass before any of this gets committed. (Update
+2026-07-13: 1167_410 specifically WAS checked, and did not render correctly — see below. The
+other four enabled faces are still unconfirmed.) Included in the same `00a1022` commit as the
+previous entry.
+
+**Open question for later, not addressed:** the four other enabled faces (`174_410`, `228_410`,
+`2051_410`, `1041_410`) were not individually checked for whether they also render a battery
+element — the `update_faces()` fix applies uniformly to all of them since it's one shared
+function, so they should also now show the real value if they bind to it at all, but their
+`watchface.png` previews weren't inspected for a battery indicator specifically (only 1167_410
+and 2151_410 were, per the user's report of "along with one of the other watch faces").
+
+
+2026-07-12 — "Funny state" after reboot: screen goes dark, unresponsive to touch — RESOLVED, nvs erased
+---------------------------------------------------------------------------------------------------------
+Symptom: watch showed a boot splash, then went dark and stayed dark; appeared totally
+unresponsive to touch. A soft reset (DTR/RTS pulse over the native USB-Serial-JTAG
+link, same mechanism esptool/idf-monitor use — /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_80:B5:4E:F3:30:F4-if00)
+produced a clean boot log (`Setup done`, `v6.3 [fbiego]`, ESP32-S3, MAC 80:b5:4e:f3:30:f5)
+but the dark-screen/no-touch-response symptom persisted. A full physical battery
+disconnect (~10 min, the known fix for this hardware family's occasional stuck-PMIC
+state — see the OLEDS3Watch project's equivalent note) made no difference either.
+
+Root cause, found by reading source: brightness is persisted via the ESP32
+`Preferences` library (`prefs.begin("my-app")`, app_hal.cpp:1837) into the `nvs`
+partition (partitions_16M.csv: offset 0x9000, size 0x5000 / 20KB) — separate from the
+firmware itself (`app0`) and watch-face storage (`ffat`). At boot it loads
+`prefs.getInt("brightness", 100)`. Critically, the main loop's screen-wake path
+(app_hal.cpp ~2330) re-applies that *same stored value* every tick whenever the screen
+is "on" (`screenBrightness(lv_slider_get_value(ui_brightnessSlider))`), and the touch
+handler (`my_touchpad_read`, app_hal.cpp:271-284) does correctly call `screen_on()` on
+a real touch — so the "wake" logic was working, but brightness was being force-set back
+to whatever was last saved (near 0) every time. Matches the user's own account: the
+last action before the funny state was dragging the brightness slider down.
+
+Fix applied: erased just the 20KB `nvs` partition via `esptool erase-region 0x9000
+0x5000` — resets brightness/timeout/touch-calibration/etc. back to firmware defaults,
+does not touch firmware (`app0`) or watch-face data (`ffat`). Confirmed working
+on-device afterward (screen now shows content on boot, user confirmed).
+
+Tooling note for next time: the Debian/Ubuntu apt package `esptool` (4.7.0+dfsg) is
+missing its bundled stub-flasher binaries (dfsg repackaging strips precompiled blobs),
+so `erase_region`/most flash operations fail even with `--no-stub` (ROM bootloader
+alone doesn't support erase_region). Fix: installed real esptool from PyPI into
+`~/.local` via `pip3 install --user --break-system-packages --ignore-installed
+--force-reinstall esptool` (got 5.3.1). Use `~/.local/bin/esptool` (note: no `.py`
+suffix needed/preferred; `esptool.py` invocation form is deprecated) for any future
+flash-level operations on this board, not the apt one.
+
+Possible side effect not yet confirmed either way: erasing `nvs` may also have cleared
+BLE pairing/bonding state (same partition, no dedicated bonding partition in
+partitions_16M.csv) — may need to re-pair with the Chronos phone app. Not confirmed
+broken or working, just flagging it as untested.
+
+
+2026-07-13 — 1167_410 face: battery bar wraps to empty at full charge, percentage missing its ones digit — FIXED, flashed, confirmed
+------------------------------------------------------------------------------------------------------------------------------------
+User-reported symptom, on the real device with the now-real AXP2101 reading in place (previous
+entry): the 1167_410 face's battery bar icon looked fine while charging but dropped to empty right
+at 100%, and the percentage number was missing its last digit (40% displayed as "4").
+
+Root cause, in `update_status_1167_410()` (src/faces/1167_410/1167_410.c):
+- Bar: `face_1167_410_2_112000` (11-frame icon) was indexed with
+  `(battery / (100 / 11)) % 11`. Integer division: `100/11` truncates to `9`. At `battery=100`,
+  `100/9=11`, `11%11=0` — wraps back to the empty frame exactly at full charge.
+- Digits: three image slots existed (`face_1167_410_3_171192` at x=189 showing `battery/10`,
+  `face_1167_410_4_171192` at x=172 showing `battery/100` correctly hidden except at exactly 100%,
+  `face_1167_410_5_171192` at x=155 showing `battery/1000` — always zero for a 0-100 value, and
+  *not* hidden). No slot ever computed `battery%1` (the true ones digit), so the tens digit at
+  x=189 was the only thing that ever visibly changed — hence "4" instead of "40".
+
+Fix (src/faces/1167_410/1167_410.c + .h, this face only — bug pattern likely exists in sibling
+faces generated by the same bin2lvgl pipeline, e.g. plain `1167`, but only 1167_410 was touched
+since it's the only one of that family enabled/tested on this board):
+- Bar index changed to `(battery / 10) % 11` — maps 0-100 onto 0-10 directly, no wraparound
+  possible for any value in range.
+- Added a new digit image object `face_1167_410_47_171192` (positioned x=206, 17px right of the
+  tens digit at x=189 — matches the existing 17px digit pitch), driven by `(battery / 1) % 10`.
+- Hid the always-zero thousands-digit slot (`face_1167_410_5_171192`) permanently at init — it's
+  meaningless for a 0-100 value and was left visibly showing a stray "0".
+- First flash attempt showed the new ones-digit overlapping the '%' glyph badly (glyph is 15px
+  wide, new digit slot only had ~4px clearance before the '%' at x=210). Moved the '%'
+  (`face_1167_410_6_175276`) from x=210 to x=227 to clear it.
+
+Verified: `pio run -e lolin_s3_2_06` builds clean, flashed via
+`pio run -e lolin_s3_2_06 -t upload --upload-port /dev/ttyACM0`, user confirmed on-device the bar
+holds full at 100% and the percentage now reads correctly as two digits with the '%' clear of the
+new digit.
+
+Committed as `e7ac3b1` on branch `fix/1167-410-battery-digit` (see branch-strategy entry below).
+
+
+2026-07-13 — Investigated: touch-to-wake battery drain, and AXP2101/RTC power-off behaviour (no code change, findings only)
+------------------------------------------------------------------------------------------------------------------------------
+User observation: "touch to wake" seems to drain the battery heavily, and when the battery goes
+fully flat the watch appears to power off but the RTC keeps time regardless — asked how the
+firmware decides to power off, and whether it's safe for the RTC to be drawing off a flat battery.
+
+Findings, from reading hal/esp32/app_hal.cpp (no fix attempted, this was pure investigation):
+- There is no real sleep state anywhere in this firmware — grepped for `esp_sleep`,
+  `esp_light_sleep_start`, `esp_deep_sleep`, `gpio_wakeup` across `src/` and `hal/`: zero hits.
+  "Screen off" (the `screenTimer` timeout, ~line 2387, "Screen timeout" log) only calls
+  `screenBrightness(0)` — for this board that's `tft.setBrightness(0)`, a backlight PWM call. It
+  does not sleep the display panel or the ESP32.
+- `hal_loop()` (line ~2201) runs unconditionally every ~5ms regardless of screen state:
+  `lv_timer_handler()` (full LVGL redraw/animation tick — the seconds hand keeps animating with
+  the backlight off), `watch.loop()` (ChronosESP32 BLE + touch-input processing), plus a 30s
+  AXP2101 battery poll over I2C (added in the 2026-07-12 battery-reading work above). So the CPU,
+  touch controller, LVGL, and BLE stack are at full active-mode current draw the entire time the
+  screen is dark — "touch to wake" is not waking from sleep, there's no sleep to wake from. This is
+  the actual drain source, not the touch polling itself.
+- Grepped every `PMU.` call site in the codebase: only `.init()`, `.getBatteryPercent()`,
+  `.isCharging()`, `.isVbusIn()` exist. No `setSysPowerDownVoltage`, no low-battery shutdown IRQ
+  config, nothing — the firmware never tells the AXP2101 when to cut power. The power-off observed
+  at empty battery is the AXP2101's own factory-default hardware over-discharge protection, not a
+  firmware decision.
+- RTC-survives-flat-battery: not verifiable from this repo (board wiring/schematic, not firmware),
+  but the PCF85063 is a separate low-power timekeeping chip and boards built around it near-
+  universally give it its own small backup source (backup cap or coin cell) isolated from the main
+  battery rail, specifically so it survives the PMIC cutting the main rail — standard, expected,
+  safe design. Would need the Waveshare board schematic to confirm definitively for this specific
+  unit; not available in this repo.
+
+Not started: an actual real-sleep implementation (light sleep + touch-controller IRQ as wake
+source) would fix the drain, but is a real feature addition, not attempted this session.
+
+
+2026-07-13 — Git identity + branch strategy set up for upstream contribution
+------------------------------------------------------------------------------
+Git had no user.name/user.email configured on this machine at all — first commit attempt failed
+outright. Set repo-local only (not --global, deliberately — this machine may host other repos
+under a different identity later): `user.name = BigGremlin`, `user.email =
+72744346+BigGremlin@users.noreply.github.com` (GitHub-provided noreply address for the BigGremlin
+account, id 72744346 via `gh api user`, chosen over the personal email to keep it out of public PR
+history).
+
+Branch strategy agreed with the user, since `main` had two unrelated uncommitted changesets sitting
+directly on it with no branch cut (the AXP2101 battery-read work from 2026-07-12, and the
+1167_410 digit fix from today) and both are headed for upstream PRs against `fbiego/esp32-c3-mini`:
+- `main` stays a clean mirror of `upstream/main` — fast-forward pulls only, never commit here
+  directly. It's just the base new branches get cut from.
+- One topic branch per fix intended for upstream, e.g. `fix/axp2101-battery-read`,
+  `fix/1167-410-battery-digit` — small and focused, one bug per PR. Push to `origin`
+  (BigGremlin/esp32-c3-mini), `gh pr create --repo fbiego/esp32-c3-mini` against upstream.
+- `gremlinDev`: long-lived branch off `main`, merges in every fix branch (so it always has
+  everything for actually building/flashing day-to-day) plus anything not intended for upstream at
+  all (personal tweaks, board-specific hacks too narrow for the original project, this notes file
+  itself). Periodically merge/rebase in `main` (after pulling `upstream`) to stay current.
+
+Since both existing changesets are clean, general bug fixes (not personal-only hacks), both got
+their own topic branch off `main` and were committed there (`fix/axp2101-battery-read` = `00a1022`,
+`fix/1167-410-battery-digit` = `e7ac3b1`), then merged into a new `gremlinDev` branch
+(merge commit `3c9ecfc`) alongside this notes file. `main` itself remains untouched at `888f308`
+(no local commits on it). Neither fix branch has been pushed to `origin` or PR'd yet — that's the
+next step whenever the user's ready to open the upstream PRs.
