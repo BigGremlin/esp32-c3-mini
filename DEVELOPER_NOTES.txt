@@ -1601,3 +1601,74 @@ Still-open items, unchanged: hand pivot/length further review ("will check more 
 followed up), and the "lines above/below LCD characters" concern from 07-18 - worth checking
 whether that's actually resolved now given the LCD background rewrite two sessions ago, or still
 needs a dedicated look.
+
+
+2026-07-20 (cont. 4) — Extreme Power Save: investigation + plan, steps 1-2 done
+------------------------------------------------------------------------------------------------
+New feature request: port as much of OLEDS3Watch-joaquim's power-management work as makes sense,
+gated entirely behind a new "Extreme Power Save" Settings switch - when on and on battery, sleep
+as deep as possible (CPU, touch, BLE all off); when off, current behaviour unchanged. Before
+touching code, did two rounds of investigation per explicit user request.
+
+**Button investigation.** This board (`ESPS3_2_06`) has two physical buttons: GPIO0 ("BOOT") and
+a bare hardware EN/CHIP_PU reset (never software-visible on any ESP32 board, nothing to reference
+in firmware, identical behaviour regardless of project). `BUTTON_HOME` (GPIO0) is an established
+pattern already used by `ELECROW_S3`/`VIEWE_*`/`ESP32_CYD` in `pins.h`, and confirmed as real,
+working hardware on this exact board via `OLEDS3Watch-joaquim` (same physical board, GPIO0 polled
+every 50ms for its button-sleep feature) - but `ESPS3_2_06` never had `BUTTON_HOME` defined, so
+chronos-watch's existing `Button2`/`btn_home_handler` code (single/double/triple/long-click, all
+already written) was simply dead for our board. Zero risk of clobbering anything on our board.
+
+**Display-pipeline risk investigation**, since OLEDS3Watch-joaquim's own attempt at real light
+sleep (`8a4fa1b`/`81340bd`) caused a confirmed, severe display-banding regression there and was
+fully reverted (`58708c9`) - root cause never fixed, just avoided. Checked joaquim's *current*
+state precisely rather than trusting old notes: `CONFIG_FREERTOS_USE_TICKLESS_IDLE is not set`,
+`display_manager_pm_early_init()` defined but never called - light sleep is genuinely inert there
+today. Joaquim's own root cause was `trans_queue_depth=32` (deep async SPI transaction queue)
+getting transactions dropped/reordered under load. Chronos-watch's own display stack was checked
+directly rather than assumed safe-or-not: same general chunked-partial-buffer LVGL pattern (40-line
+buffer, even shorter than joaquim's 100), but a **completely different driver** - `Arduino_GFX`
+(not ESP-IDF's `esp_lcd` BSP driver), `Arduino_ESP32QSPI` bus with `.queue_size = 1` (checked the
+actual library source) - i.e. transactions are effectively blocking/synchronous, one at a time.
+This structurally rules out joaquim's specific reorder/drop failure mode (there's nothing to
+reorder with a depth-1 queue), though a lesser sleep-induced-delay-between-chunks risk could still
+exist and needs real on-device testing, not just this static analysis.
+
+**Also confirmed**: chronos-watch has zero WiFi usage anywhere (nothing to turn off there), and
+ChronosESP32 already exposes a clean `watch.begin()`/`watch.stop(bool clearAll)`/`watch.isRunning()`
+API for BLE - `stop(true)` fully deinits NimBLE, no internal hacking needed. `TouchDrvFT6X36` (our
+touch driver) already has `sleep()`/`wakeup()` methods (wakeup calls `reset()` internally) - cleaner
+than joaquim's manual GPIO-reset-hold. User confirmed: BLE should be **fully stopped** (not just
+touch/CPU sleeping) while asleep on battery - it's a real power draw and phone reconnect-on-wake is
+an acceptable tradeoff.
+
+**Agreed plan, staged, one tested/flashed piece at a time** (matching this project's established
+pattern): (1) enable GPIO0 button, isolated test. (2) Add the Settings switch, persisted, no
+behaviour yet. (3) Charge-aware screen timeout (stay on indefinitely on `PMU.isVbusIn()`, button
+forces off regardless of power state) gated by the switch. (4) Touch sleep/wake tied to
+screen-off-while-on-battery + switch. (5) BLE stop/begin tied to the same condition - flagged to
+verify on-device whether the phone reconnects cleanly after a stop/begin cycle. (6) CPU light sleep
+last, its own isolated experiment, since it's the one piece with no working precedent to lean on.
+
+**Step 1 DONE, tested, committed (`a8d692f`).** Defined `BUTTON_HOME 0` for `ESPS3_2_06` in
+`pins.h` - no other code changes needed, the existing Button2 wiring just activated. Built,
+flashed, boot-clean. **User confirmed**: top button is GPIO0, single-click/double-click/long-press
+(home/app-list/face-picker) all working as expected.
+
+**Step 2 DONE, tested, committed (`56abfea`).** New `ui_extremePowerSave{Panel,Icon,Switch,Label}`
+row in Settings (`src/ui/ui.c`), placed right after the Screen Timeout row, built identically to
+the existing "Auto Start Nav" switch (icon + `lv_switch` + label, `ui_img_battery_state_png` icon).
+`onExtremePowerSave()` in `app_hal.cpp` sets a new `extremePowerSave` bool and persists it via
+`prefs.putBool("extremepwr", ...)`, loaded at boot the same way `navSwitch`/`autonav` already is.
+Added the `onExtremePowerSave` prototype to `ui_events.h` plus no-op stubs in the pico/sdl2 HAL
+backends (matching `onNavState`'s existing per-backend pattern) so all three build targets stay
+consistent - only the esp32 backend has a real implementation. **No sleep/BLE/touch behaviour
+wired up yet, deliberately** - this step is purely "does the toggle persist."
+Built, flashed, boot-clean. **User confirmed**: toggle persists across reboot. Also noted the
+switch doesn't show its blue checked-state fill after a reboot even though the state is genuinely
+set - checked against the existing "Auto Start Nav" switch, which does the exact same thing, so
+this is a pre-existing app-wide LVGL/theme cosmetic quirk, not a regression from this change. Not
+fixed, out of scope, user said to forget about it.
+
+**Next up (step 3, not started)**: charge-aware screen timeout + button-forces-off, gated by the
+switch.
