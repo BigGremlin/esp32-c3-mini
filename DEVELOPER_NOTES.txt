@@ -1456,3 +1456,48 @@ site (not per-update, since they're never meant to be shown). Built, flashed, bo
 All three changes (face swap, temp-digit wiring, speckle fix) flashed and confirmed on-device this
 session. Not yet committed to git along with the rest of this session's uncommitted citizen_410/
 red_magic_410/classic_410 work.
+
+
+2026-07-20 — citizen_410: session committed+pushed, then black lines above/below LCD windows fixed
+------------------------------------------------------------------------------------------------
+Picked this project back up in a new session. First housekeeping: the entire multi-day uncommitted
+pile (citizen_410, red_magic/red_magic_410, classic_410, the 1167_410/174_410 face swap, the
+2151_410 weather fix) was batch-committed to `gremlinDev` (`110ef05`) and pushed to the `origin`
+fork. Push initially failed with GitHub's "password authentication not supported" - fixed via
+`gh auth setup-git` (wires the already-logged-in `gh` token in as git's credential helper); see
+memory `reference_gh_github_auth` for next time. Also confirmed the previously-flagged "temporary
+09:50:00 time override" is no longer present in `app_hal.cpp` - already resolved, notes were stale.
+
+**Then the user reported (from a photo, description-only this session - no image was actually
+re-attached) unwanted black lines above and below the date window**, guessing it might be related
+to how the LCD-panel background color was matched. Investigated by decoding
+`face_citizen_410_lcd_bg`/`_lcd_bg_left` back to pixels (`tools/facegen/lvgl_img.py`) and measuring
+per-row brightness rather than guessing from the C code alone - confirmed **two real, compounding
+bugs**:
+1. **Heavy Gaussian-blur edge-darkening baked directly into the patch pixels.** Top rows of both
+   patches (and the bottom rows of the battery patch) were 40-50 brightness points darker than the
+   plateaued interior - e.g. date patch row 0 was 94.8 vs a ~164 plateau; battery patch row 0 was
+   84.6 vs a ~161 plateau. Classic blur-near-a-crop-boundary artifact, same family of bug as the
+   already-logged "margin=10 pulled in red" battery-patch issue from 07-17, just not fully purged.
+2. **Box/asset height mismatch, independent of the above.** `DATE_BOX_H` had grown to 62 at some
+   point after the LCD background asset was last generated at 53x54 (its own header comment still
+   said "grown to 53x54", stale) - an 8px gap. Same shape for the battery box: `BATT_BOX_H` 27 vs
+   asset height 25, a 2px gap. Non-tiled `bg_image_src` on an `lv_obj` doesn't stretch to fill a
+   larger box by default (`scale_x`/`scale_y` default to `LV_SCALE_NONE` - checked
+   `lv_draw_image_normal_helper` in the vendored LVGL source directly rather than assume), so these
+   extra rows at the bottom of each box were left completely undrawn.
+
+**Fix**: for each patch, measured per-row brightness, trimmed off any row below 85% of the
+plateau's brightness (removes the dark edge bands), then resized the remaining clean core
+(LANCZOS) to exactly the real box dimensions (53x62, 54x27) - this fixes both bugs in one pass,
+since it removes the darkening *and* closes the size gap. No original source photo needed - worked
+directly off the already-baked-in asset pixels via `tools/facegen/lvgl_img.py`'s
+decode/encode/format helpers. Verified after: date patch row 0 brightness 94.8 -> 139.4, battery
+patch row 0 84.6 -> 142.7, both now close to their plateau instead of near-black.
+
+Built clean (flash 84.0%, comfortably under budget, `.pio` output unchanged in shape from before),
+flashed via `pio run -t upload`, boot log watched via a DTR/RTS reset pulse - clean, `AXP2101
+battery: 100%, charging: 0`, `Setup done`, no crash-loop. Committed (`85953c1`) and pushed.
+**Not yet visually confirmed on-device by the user** - that's the next step when picking this back
+up. Still-open items from earlier sessions (hand pivot/length further review, DSEG14 font isolated
+retest) untouched this session.
