@@ -180,7 +180,7 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     /* Divider: thin LCD-style rule between day and date, sitting in the gap
        between the day baseline (~row 27) and the date row start (row 32). */
     lv_obj_t *day_date_divider = lv_obj_create(date_box);
-    lv_obj_set_size(day_date_divider, DATE_BOX_W - 12, 1);
+    lv_obj_set_size(day_date_divider, DATE_BOX_W - 12, 2);
     lv_obj_set_pos(day_date_divider, 6, 28);
     lv_obj_set_style_bg_color(day_date_divider, lv_color_hex(0x5a5a5a), 0);
     lv_obj_set_style_bg_opa(day_date_divider, LV_OPA_COVER, 0);
