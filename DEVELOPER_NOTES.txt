@@ -1670,5 +1670,21 @@ set - checked against the existing "Auto Start Nav" switch, which does the exact
 this is a pre-existing app-wide LVGL/theme cosmetic quirk, not a regression from this change. Not
 fixed, out of scope, user said to forget about it.
 
-**Next up (step 3, not started)**: charge-aware screen timeout + button-forces-off, gated by the
-switch.
+**Step 3 DONE, tested, committed (`5b7bf59`).** New `staying_on_for_charging()` helper (returns
+`extremePowerSave && PMU.isVbusIn()` on `ESPS3_2_06`, hardcoded `false` on every other board so
+their behavior is byte-for-byte unchanged - other boards have no AXP2101/VBUS sensing at all).
+Main-loop screen-timeout expiry check gets an extra `!staying_on_for_charging()` guard - screen
+just never auto-times-out while it's true.
+**Real bug caught before flashing, not after**: the GPIO0 button's existing single-click
+force-off used a "rewind `screenTimer.time` into the past, let the normal expiry check fire on the
+next tick" trick - which stops working the moment that same expiry check is suppressed for
+charging. Traced through the logic by hand before testing on-device and fixed it: when
+`staying_on_for_charging()` is true, the button now clears `screenTimer.active`/brightness
+directly instead of relying on the rewind trick. The original (on-battery, or switch off) button
+path is completely untouched - only the new charging-aware case got the direct branch.
+Built, flashed, boot-clean. **User confirmed all three behaviors on-device**: screen stays on
+past a short timeout while plugged in with the switch on; the button turns it off on demand in
+that state; unplugging restores the exact original timeout behavior.
+
+**Next up (step 4, not started)**: touch sleep/wake (`touch.sleep()`/`touch.wakeup()` on
+`TouchDrvFT6X36`) tied to screen-off-while-on-battery, gated by the switch.
