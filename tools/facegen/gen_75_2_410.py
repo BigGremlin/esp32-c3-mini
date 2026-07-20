@@ -39,6 +39,13 @@ def parse_all_frames(path):
     return frames
 
 def process_asset_file(fname):
+    # NOTE: the face-picker's thumbnail card (addWatchface() in ui.c) is a fixed
+    # 160x160 slot regardless of main canvas resolution - the preview asset must stay
+    # unscaled or it overflows that slot (this bug shipped once already: 75_2_410's
+    # preview went out at 273x273 and looked like the swipe only moving the image
+    # within its own frame rather than the whole card; fixed by hand afterward,
+    # excluding it here too so a future re-run of this script doesn't reintroduce it).
+    scale = "preview" not in fname
     path = os.path.join(SRC_DIR, "assets", fname)
     frames = parse_all_frames(path)
     assert frames, f"no frames parsed from {fname}"
@@ -50,8 +57,8 @@ def process_asset_file(fname):
     new_dims = None
     for fr in frames:
         img = decode_to_rgba(fr["w"], fr["h"], fr["vals"], fr["has_alpha"])
-        new_w = max(1, sc(fr["w"]))
-        new_h = max(1, sc(fr["h"]))
+        new_w = max(1, sc(fr["w"])) if scale else fr["w"]
+        new_h = max(1, sc(fr["h"])) if scale else fr["h"]
         new_dims = (new_w, new_h)
         # Source RGB is already alpha-premultiplied (confirmed by inspecting raw
         # partial-alpha pixels), so a direct resize is the mathematically correct

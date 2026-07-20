@@ -420,3 +420,1039 @@ speckling are all good.
 turned out broken) and a hand-picked design decision (letterbox vs stretch) rather than a general
 bug fix. Belongs on `gremlinDev` only. Not yet committed as of writing this entry — see git log
 for whether that's since changed.
+
+
+2026-07-16 — Chasing a "Casio" watchface seen in the Chronos App; app-side install confirmed a no-op
+------------------------------------------------------------------------------------------------------
+User spotted a Casio-style face under the Chronos App's "ESP32 Files" section and asked to get it
+converted and flashed in. Two things got confirmed along the way, worth keeping straight:
+
+**In-app "Install" does nothing on this firmware.** User tried tapping Install on the face
+directly from the phone; it retried a few times and failed. Checked whether that leaves any
+partial/corrupt file behind that would need cleanup — it doesn't, because there's nothing to
+clean up. `~/chronos-esp32/src/ChronosESP32.cpp`'s `onWrite()` (~line 1358) has:
+```
+if (pData[0] == 0xB0) { // bin watchface chunk info }
+if (pData[0] == 0xAF)  { // bin watchface chunk data }
+```
+— both bodies are empty, comment-only stubs. The BLE packets for a watchface push arrive and are
+silently dropped; nothing is written to flash/LittleFS, no ack goes back to the app (which is why
+it just keeps retrying then gives up). Matches the README's own admission that "Installable
+custom watchfaces from Chronos app" is marked ToDo/WIP for LVGL 9. So: app-side install is a dead
+end on this codebase as it stands — the only working path for a new face is still the
+precompiled-into-firmware route documented above (75_2_410 etc.), which means sourcing the raw
+dial `.bin` some other way (candidate: `fbiego/watch-face-wearfit`, ~500+ dials across board-model
+folders, but they're keyed by anonymous numeric ID with no style/brand metadata — no "casio"
+string anywhere in that repo — so matching one to the specific face the user saw requires a visual
+compare against a screenshot, not a text search).
+
+**Resolution re-confirmed: 410x494 is the number that matters for face-shopping, not 410x502.**
+Got momentarily mis-stated mid-session as "the active board is elecrow_c3_1_28, 240x240" by trusting
+`platformio.ini`'s uncommented `default_envs` line instead of checking real build evidence — this
+exact trap was already flagged in the 2026-07-12 entry above ("default_envs is currently
+elecrow_c3_1_28, NOT our board") and got re-tripped over anyway. Corrected by checking
+`.pio/build/` directly, which only contains `lolin_s3_2_06/` — that's the real target. For
+resolution specifically: the BSP's raw panel buffer (`hal/esp32/displays/pins.h`,
+`SCREEN_WIDTH`/`SCREEN_HEIGHT` under `ESPS3_2_06`) is 410x502, but the number the firmware
+actually advertises to the Chronos App — `CS_410x494_200_RTF` in
+`chronos-esp32/src/ChronosESP32.h:260`, "410x494, 2.0 inches, Rectangular" — is 410x494, 8px
+shorter. That 494 figure is almost certainly what the app used to filter/offer the Casio face in
+"ESP32 Files" in the first place, and matches the already-documented 75_2_410 letterboxing math
+above (`Y_OFFSET = (494 - 410) / 2`). **Takeaway: when hunting for a compatible dial, 410x494 is
+the figure to match against — 502 is only the raw hardware buffer, not the usable/advertised
+watchface canvas.**
+
+Status as of writing: still waiting on a screenshot of the actual face thumbnail from the user to
+attempt a visual match against watch-face-wearfit's dial pool. No conversion started yet.
+
+
+2026-07-16 (cont.) — "Red Magic" (chronos.ke, sernason, 360x360) converted, built, flashed
+------------------------------------------------------------------------------------------------
+Abandoned the watch-face-wearfit/GitHub angle above — found `chronos.ke/dials` instead, fbiego's
+own community dial-sharing site referenced by the official Chronos FAQ ("Online watchfaces are
+provided by the user community"). It's a real browsable+searchable gallery (1168 dials, plain
+`?width=&height=&page=N` GET pagination, no JS needed), unlike the numeric-only GitHub repo. Did
+find two actual Casio-branded faces there (RafSad's G-Shock-style "CASIO" and GudWin's
+Edifice-style "Casio", both 360x360) — neither was confirmed as the exact one the user originally
+saw in-app, but user picked a third face instead: **"Red Magic" by sernason** (360x360, tagged for
+"X16 Pro"), share md5 `2582a02d9de4fc9ebae2abe3639dae95`.
+
+**Download API gotcha:** `chronos.ke/api/dials/download?md5=...` 403s ("No authorization key") on
+a bare request — not a real auth token, just needs a same-session cookie: `curl -c/-b cookies.txt`
+to GET the `?share=<md5>` page first, *then* hit the download endpoint with that cookie jar +
+matching `Referer`. Works with plain curl once sequenced right, no browser needed.
+
+**Conversion pipeline generalized beyond the 75_2_410 precedent.** That script hand-transcribed
+the whole watchface C file into a Python template — fine for 75_2's 5 elements, not viable for Red
+Magic's ~50. New script `tools/facegen/gen_red_magic_410.py`:
+- Asset scaling (decode/resize/re-encode each frame) reused the same approach as 75_2_410's
+  `process_asset_file`, generalized to auto-discover every file in `assets/` via `glob` instead of
+  a hardcoded filename list.
+- The "logic" `.c`/`.h` (element creation, positions, update functions) is regex-rewritten from
+  bin2lvgl's own generated output rather than retyped: every `lv_obj_set_x(ident, N);` /
+  `lv_obj_set_y(ident, N);` gets its N scaled (y also gets `+Y_OFFSET`), `lv_img_set_pivot`/
+  `lv_image_set_pivot` calls scaled on both axes, everything else (rotation formulas, digit-group
+  indexing, update_* function bodies) left untouched since those aren't position-dependent. Should
+  generalize to future faces with many more elements than 75_2_410 ever needed to handle.
+- **Identifier-rename bug hit and fixed immediately:** first attempt used
+  `re.sub(r'\bred_magic\b', ...)` for the `red_magic` → `red_magic_410` rename — never matched,
+  because every real occurrence is `..._red_magic_...` and `_` counts as a word character, so
+  there's no `\b` boundary between `face_` and `red_magic`. Fixed to a plain `str.replace()` (safe
+  here since `str.replace` doesn't re-scan its own output, so `red_magic` → `red_magic_410`
+  doesn't loop).
+- **This time no `.header.always_zero` vs `.header.magic` issue** — the 75_2 gotcha didn't recur;
+  every asset file bin2lvgl generated for Red Magic already used `.header.magic =
+  LV_IMAGE_HEADER_MAGIC` directly. Also confirmed the generated logic file's LVGL-8-style calls
+  (`lv_img_create`, `lv_img_set_src`, `lv_obj_clear_flag`) compile fine as-is under this project's
+  LVGL 9.3.0 — matches the pattern already present in `digital_360.c` and other working faces, so
+  left unrenamed (LVGL 9 clearly ships back-compat aliases for these).
+- Validated the scale+letterbox result *before* spending a build+flash cycle by writing a quick
+  standalone PIL compositor (parses `lv_obj_set_x/y` + initial `lv_img_set_src` out of the
+  generated `.c`, decodes+pastes each asset at its position onto a 410x494 canvas) — caught layout
+  bugs would have shown up here, none did; proportions and letterbox bars matched the original
+  360x360 preview.
+
+**Wired in:** `ENABLE_FACE_RED_MAGIC_410` added to `hal/esp32/app_hal.h`'s `ESPS3_2_06` block;
+`init_face_red_magic_410`/`update_check_red_magic_410` appended to `ui_watchfaces_init()`/
+`ui_update_watchfaces()` in `src/ui/ui.c` (same pattern as `75_2_410`/`classic_410`). No manual
+`#include` needed — `support/header_gen.py` walks `src/faces/**/*.h` and regenerates
+`src/common/generated_features.h` on every `pio run`, which is why that file always shows as
+diff-noise post-build (`git checkout -- src/common/generated_features.h`, as previously noted).
+
+**Built + flashed clean:** `pio run -e lolin_s3_2_06` succeeded (Flash now at 91.4% — getting
+close to the ceiling, worth watching before adding more faces), `pio run -e lolin_s3_2_06 -t
+upload` succeeded via PlatformIO's own bundled esptool (no need for the manually-installed
+`~/.local/bin/esptool` this time — that was specifically needed for the raw `erase_region` nvs
+operation before, not normal uploads). Serial boot log clean afterward: `Setup done`, `v6.3
+[fbiego]`, no exceptions. **Not yet visually confirmed on-device** — user is checking now.
+
+New files: `src/faces/red_magic_dial.bin` (raw download), `src/faces/red_magic/` (bin2lvgl output,
+360x360, `ENABLE_FACE_RED_MAGIC` — left disabled/unused, kept only as the scaling source),
+`src/faces/red_magic_410/` (the real face, 410x494 canvas), `tools/facegen/gen_red_magic_410.py`.
+Nothing committed yet.
+
+
+2026-07-16 (cont. 2) — Seconds hand added, weather wired up, three real bugs found+fixed
+------------------------------------------------------------------------------------------------
+User asked for two extras on top of the base port: (1) animate one of the 3 undecodable
+"Analog x5" elements as a seconds hand, (2) wire up the top-left temperature readout (previously
+static placeholder digits) to real weather data in Celsius.
+
+**Confirmed via source, not guessing, that the 3 "Analog x5" elements are NOT recoverable
+hour/min/sec hands.** User reasonably asked whether the moving-hand addition might reveal the
+other two were originally hour/minute hands. Found real Kotlin source (not just the compiled jar)
+at `~/esp32-lvgl-watchface/src/faces/bin2lvgl.kt`: its type table has `0x0D -> Item(true, "Analog
+hands")` (genuine clock hands, fully *supported*) as a distinct type from `0x1A -> Item(false,
+"Analog x5")` (what Red Magic actually uses, *unsupported*). Since bin2lvgl converts 0x0D
+successfully whenever it's present, the fact all three came through as the different/unsupported
+0x1A type rules out the hands theory — they're something else (probably an animated ring/pulse
+effect tied to the two red gauge rings already baked into the static background art), format
+undocumented anywhere found. So the added seconds hand is a genuine synthesized addition, not a
+recreation — but its *position* (180,180 in source-space, dead center) is real, recovered straight
+from the items.txt pivot coordinates that survived even though the graphic itself didn't convert.
+
+**Seconds hand implementation:** new asset `assets/face_red_magic_410_dial_img_seconds_hand.c` —
+hand-drawn (PIL, tapered red gradient + counterweight dot, 8x88px, pivot at (4,78)) rather than
+recovered, since the source format for the original elements is unknown. Wired exactly like
+`75_2_410`'s existing hands: `lv_obj_set_x/y` positions the pivot at dial-center (205,247 —
+180,180 scaled + Y_OFFSET), `lv_image_set_pivot(obj, 4, 78)`, rotation driven by
+`lv_image_set_rotation(hand, second * 60)` in `update_time_red_magic_410` (LVGL9 rotation units
+are tenths-of-a-degree, so 60 = 6.0°/sec = one full turn per minute).
+
+**Weather: three real bugs, all now fixed, worth remembering individually:**
+1. **Wrong unit conversion.** First guess (from a bad on-device reading of "72°C") was that
+   `watch.getWeatherAt(0).temp` must be Fahrenheit needing conversion. Wrong — checked the
+   *working* `1167` face's `update_weather_1167()`, which uses `temp` completely raw with no
+   conversion at all (plus a dedicated hidden minus-sign glyph for negative values, an asset
+   `red_magic`'s source dial doesn't have an equivalent of) and correctly shows sane values on
+   the same hardware. So `temp` is already Celsius — the "72" was actually caused by bug #2 below,
+   and "fixing" it with F→C math on already-correct data made things worse. Reverted to raw
+   `temp`, clamped to 0 on negative (accepted limitation — no sign glyph available here).
+2. **Hundreds/ones digit positions reversed.** `items.txt` has the three temp-digit objects at
+   x=70/60/50. Cross-checked against this same file's own working kcal-digit code (x=238/228/
+   218/208 mapped ones/tens/hundreds/thousands) — higher x = lower place value. First attempt had
+   this backwards (assigned hundreds-place math to the x=70/highest object, ones-place math to
+   x=50/lowest, and hid the wrong one when <100), which is what actually produced the garbled
+   "-0-"-looking output, not corruption — decoded and visually inspected the underlying
+   `0123456789` glyph strip directly to rule out a repeat of the old planar-decode corruption bug;
+   it's clean. Fixed the index/hide mapping to match the proven x-position convention.
+3. **°C/°F label glyph never selected.** Two pre-baked label images exist at the same position
+   (`face_red_magic_410_13_133026` and `_14_136230`); decoded both directly to identify which is
+   which (no metadata for this in bin2lvgl's output) — 13_133026 is "°C", 14_136230 is "°F". Both
+   were being drawn with neither hidden, so whichever was created later in the object list (°F)
+   sat on top. Now explicitly shows the °C one and hides the °F one.
+
+**Fourth, unrelated bug found from a separate user report** ("your analog and red magic [faces]
+appear to have bitmaps too large... swipe... just moves the image within its own frame"): the
+face-picker's thumbnail card (`addWatchface()` in `ui.c`) is a **fixed 160x160** slot regardless
+of a face's actual canvas resolution — every correctly-behaving `_410` face (`174_410`, `1167_410`,
+`2151_410`, ...) keeps its `..._dial_img_preview` asset at the original unscaled 160x160 and only
+scales the main-canvas assets. Both `tools/facegen/gen_75_2_410.py` and
+`tools/facegen/gen_red_magic_410.py` scaled *everything* uniformly including the preview, which
+overflowed that fixed slot (75_2_410: 160→273px; red_magic_410: 160→182px) and produced exactly
+the reported symptom. Fixed both scripts to exempt any filename containing "preview" from scaling,
+and regenerated just that one asset in each face (hand-edited `.c`/`.h` logic files in both faces
+were untouched by this — only the affected asset file was touched/replaced).
+
+**Gotcha hit re-doing this:** re-running `gen_red_magic_410.py` to fix the preview scaling
+regenerated `red_magic_410.c`/`.h` from scratch from the *original* unmodified `red_magic.c`/`.h`
+in `src/faces/red_magic/` — silently wiping every hand-edit made after the first generation (the
+seconds hand and all three weather fixes above). Had to reapply all of them a second time by hand.
+**If touching this face again: either avoid re-running the generator once hand-edits exist, or
+special-case what needs preserving before doing so** — it is not currently idempotent/safe to
+re-run once the logic files have been hand-extended beyond what the script itself produces.
+
+Built + flashed clean both times (once for the initial two features, once more for the three
+follow-up fixes). Flash usage actually *dropped* after fixing the oversized previews (was
+8689504 bytes, now 8576576) — a helpful side benefit given it was already at 91%+. Not yet
+visually re-confirmed on-device as of writing — user is checking now.
+
+
+2026-07-16 (cont. 3) — two more rounds of feedback, both fixed without a confirming photo
+------------------------------------------------------------------------------------------------
+Picker fix and temperature both confirmed working by user. Two remaining issues:
+
+1. **Speckled artifact just left of the tens digit.** That position is exactly where the
+   always-hidden-below-100 hundreds-place object sits (`face_red_magic_410_12_138312`) - its
+   glyph strip was already confirmed clean by direct decode, so `LV_OBJ_FLAG_HIDDEN` alone
+   apparently isn't fully suppressing it on this object (root cause not confirmed - no photo
+   available to dig further). Fixed with a belt-and-suspenders approach: physically move the
+   object to `x = -100` (fully off-canvas) whenever it'd be hidden, on top of the existing
+   HIDDEN flag, restoring `x = 57` if it's ever actually needed (realistically never, for
+   Celsius - see next point).
+2. **Seconds hand a few px off the reticle.** Tried to nail this precisely without a photo by
+   decoding the background asset directly and measuring the reticle graphic's actual red-pixel
+   centroid: (207, 204) vs the hand's pivot at (205, 205) - only ~2px right/1px up, and in the
+   *opposite* direction from what the user described ("down and left"). Sent an annotated
+   crosshair image to cross-check, but user couldn't easily get a return photo, so went with
+   trusting the direct on-device visual report over the indirect asset-only measurement: nudged
+   the hand's object position from (201,169) to (198,172) - 3px left, 3px down. Unconfirmed as of
+   writing; worth a precise photo-based re-measure next time one's easy to get, since the two
+   signals disagreed.
+
+User also raised a good design point worth recording: the 3-digit-wide temp readout (vs. 2 digits
++ sign on the working `1167` face) only makes sense for Fahrenheit (100+°F is realistic weather;
+100+°C isn't) - and this dial does have a genuine unused `°F` label glyph sitting right next to
+the `°C` one (see the "three real bugs" entry above). But there's no live Fahrenheit data path
+into this firmware to wire it to either way - `watch.getWeatherAt(0).temp` is always Celsius
+regardless of any phone-side app preference (confirmed via `1167`'s working code) - so hiding the
+hundreds digit below 100 unconditionally is already correct as-is, nothing further to build here
+unless that protocol gains a real F/C flag someday.
+
+Built + flashed clean (boot log verified). Not yet visually re-confirmed on-device.
+
+
+2026-07-16 (cont. 4) — a real photo settles both open questions
+------------------------------------------------------------------------------------------------
+User sent an actual close-up photo (rotated 90 deg from natural UI orientation - `img.rotate(-90,
+expand=True)` corrects it) confirming temp digits now read correctly, but revealing two more
+things:
+
+**The "speckle" was a second, previously-missed real bug, not corruption.** Zooming the photo
+showed a genuine solid white dash rendering just left of the temp digits, not JPEG noise. Traced
+it to `items.txt` rows 8/9/15 - three tiny 8x2/6x2 elements at the *same x columns as the temp
+digits* (x=70/60/50, one per digit slot) using bin2lvgl type `0xFA` ("Weather no+label" -
+*supported*, unlike the Analog elements). These are a genuine minus-sign mechanism, conceptually
+the same idea as `1167`'s dedicated sign glyph but implemented as an always-rendered dash
+literally stacked under each digit position rather than a single separate object. They were
+invisible before because the always-visible digit glyphs drawn on top fully covered them - moving
+the hundreds-place digit off-canvas (the previous fix) exposed the dash underneath it
+(`face_red_magic_410_15_0`) for the first time. Fixed properly rather than just re-hiding it:
+digit math changed to use `abs(temp)` for the digits and show/hide this dash based on the actual
+sign of the unclamped `temp` - real negative-Celsius support now, not just a hidden artifact
+fixed. (The other two dashes, under the ones/tens slots, stay permanently covered since those
+digits are never hidden - no equivalent issue there.)
+
+**Hand position: photo confirmed the direction, asset measurement gave the precise value.**
+Measured the photo directly (bright pivot-dot centroid vs. the ring's dark-hole centroid, after
+correcting the photo's rotation first) and confirmed the pivot really was down-left of the true
+center - the same direction the user originally reported, meaning the previous "trust the user
+over the measurement" 3px adjustment had actually been applied in the *wrong* direction (no
+photo existed yet to catch this). Tried to get an exact pixel delta from the photo itself but the
+only convenient in-frame scale reference (the reticle ring, ~14 canvas-px / ~140 photo-px
+diameter) is too small for the ~4px photo-pixel picking noise to give a trustworthy magnitude -
+a small error in a 14px measurement swings the derived scale factor a lot. Went with the
+direction-confirmed-by-photo, magnitude-from-the-original-precise-asset-decode approach instead:
+target pivot = canvas (207,246) (measured directly from the background asset's red-pixel
+centroid, no photo/lens/JPEG noise involved) -> `lv_obj_set_x/y(203, 168)`, i.e. barely 2px
+right / 1px up from the very first (pre-user-feedback) placement of (201,169). Net effect: this
+undoes the earlier wrong 3px-left-down nudge and applies the small correction the asset math
+suggested all along. Unconfirmed as of writing - the "confirm with a real photo before adjusting
+again" lesson from earlier in this session held up: guessing from words alone moved this the
+wrong way once already.
+
+Built + flashed clean (boot log verified, including a `[DEBUG]: Connected` BLE line same as
+after the very first flash of this face). Not yet visually re-confirmed on-device.
+
+
+2026-07-16 (cont. 5) — new face: citizen_410, first hand-authored-from-a-photo watchface
+------------------------------------------------------------------------------------------------
+User supplied a product photo (Citizen Eco-Drive "Red Arrows" Skyhawk pilot watch,
+`CitizenE-DriveRedArrowsRAFA_900x.webp`, 900x900 studio shot on white) and asked for it as a
+watchface, explicitly scoped as an incremental build: "grab a raster image of the watch (inc.
+outer black dial) and we build this up over time. Start with Analogue hands, maybe put month day
+number and 3 letter week day in the right hand lcd window". So unlike every other face so far,
+this one's background is a real photo, not bin2lvgl output or hand-drawn primitives - new
+territory, new gotchas below. Only the dial + fresh hands + date window are wired up; the
+bezel scales, UTC sub-dial, left LCD window, and branding text are all still just static photo
+content for now, as scoped.
+
+**Photo processing pipeline** (`/tmp/.../scratchpad`, one-off Python/PIL/OpenCV, not committed
+as a repo tool since it's unlikely to be reused verbatim for a different photo):
+1. Located the bezel circle by eye against a coordinate-grid overlay (automatic edge/width
+   detection kept getting confused by the crown/pusher buttons protruding past the true circular
+   edge on one side) - settled on center (432,398), radius 253 in the original 900x900 photo.
+2. **Removed the photo's own baked-in hands** so they wouldn't duplicate/clash with the fresh
+   rotating hands drawn on top: `cv2.inpaint` (TELEA algorithm) with a hand-traced mask. First
+   couple of attempts had the red chronograph second hand's mask in completely the wrong place -
+   turned out that hand isn't a simple straight line from center, it has a white paddle-shaped
+   *counterweight* on the opposite side from the pointing tip (common chronograph seconds-hand
+   design), which a naive "line from center to where I thought the tip was" mask entirely missed.
+   Found the true path by a polar/radial red-pixel scan from the center (had to restrict the
+   angle search to avoid false-matching the several *other* red elements on this dial - the "9"
+   numeral, "RED ARROWS" branding, "AL-1"/"AL-2"/"TIME" text - which a naive whole-image red
+   threshold kept latching onto instead of the actual hand). Final result: hour/minute hands
+   cleanly removed, red hand and its counterweight cleanly removed; one small soft blur artifact
+   remains where the hour hand crossed the tiny UTC sub-dial/CITIZEN-logo text (inpainting
+   struggles to reconstruct fine text it has no surrounding context for) - tried several more
+   inpaint radius/algorithm/mask-width combinations to fix it, none improved on the first
+   reasonable result, so left it - it's small and much less noticeable at actual 410px watch size
+   than in a zoomed-in crop. Revisit later if it bothers the user; not worth more time now per
+   proportional-effort judgement.
+3. Circular-masked onto black (feathered via 4x supersampling) and scaled to fill the 410-wide
+   canvas → 410x410 (this dial is round enough that letterboxing top/bottom like classic_410's
+   410x462 made no sense here; full square fits naturally).
+4. Encoded as a plain opaque `LV_COLOR_FORMAT_RGB565` image (no alpha needed - the masked-out
+   area outside the circle is already pure black RGB, which matches the canvas's black background
+   exactly, so real alpha transparency would be redundant work for zero visual difference).
+   **Preview thumbnail generated separately at native 160x160** from the start this time -
+   learned that lesson properly after hitting it twice already (75_2_410, red_magic_410).
+
+**Face code**: followed `classic_410`'s hand-authored pattern (real prior art in this repo for a
+non-bin2lvgl face) rather than anything bin2lvgl-shaped - `lv_image_create`/`lv_image_set_src` for
+the static photo background instead of canvas-drawn primitives, but the *hands* and *date label*
+are lifted near-verbatim from `classic_410`'s approach (lv_line objects with trig-computed
+endpoints recalculated every `update_time_citizen_410()` call, `lv_label_set_text_fmt("%s %02d",
+DAY_NAMES[weekday%7], day)` for the date) since that part of the technique is completely
+face-agnostic. Simplified from Classic's hands (no red center "stripe" overlay - this dial's
+photo hands are plain white/silver) and added a third hand (Classic's red hand IS the second
+hand; Citizen needed hour+minute in white/silver plus a separate thin red second hand, since the
+source photo has three hands not two). Dial center measured directly from the crop construction
+(cropped centered exactly on the bezel, so center is exactly (205,205) in the 410x410 image by
+construction, not by measurement/guesswork this time). Date window position (canvas x
+270-345,y207-243, covering the photo's original "TYO/009/35" LCD box) measured directly off the
+processed 410x410 image via the same coordinate-grid-overlay technique used throughout this
+session - painted over with a plain dark box (matching classic_410's date_box style) before
+adding the label, so the new dynamic date doesn't sit on top of the photo's old static "TYO 009"
+text.
+
+**Same two gotchas from earlier in this session recurred and were caught immediately this time**
+(the payoff of having them written down): forgot `#include "../citizen_410.h"` in both new asset
+files at first (compile error, `lv_img_dsc_t`/`LV_IMAGE_HEADER_MAGIC` undeclared - same exact
+failure mode as the red_magic_410 seconds-hand asset); and generated the preview at native
+160x160 *from the start* rather than accidentally scaling it, avoiding a repeat of the
+picker-thumbnail-overflow bug.
+
+Wired into `hal/esp32/app_hal.h` (`ENABLE_FACE_CITIZEN_410`) and `src/ui/ui.c` same as every
+other face. Built clean. **Flash usage now 94.3%** (was 91.4% before this face - a single
+410x410 uncompressed RGB565 photo is ~336KB, by far the largest single asset in this project so
+far) - getting close to the ceiling, worth being conservative about adding more full-photo-based
+faces without a compression strategy. Flashed clean, boot log otherwise normal but showed one
+`Failed to allocate buffer, retrying` line that didn't repeat or crash anything (BLE connected
+fine afterward, normal screen-timeout behavior followed) - plausibly related to handling this
+much bigger image than any previous face, worth watching for if it recurs or gets worse as more
+gets added to this face, but not treated as a blocker for this first iteration. Not yet visually
+confirmed on-device - user is checking now. Next steps per the user's own scoping: nothing
+specific requested yet beyond this first iteration (dial + hands + date) - wait for feedback
+before touching the UTC sub-dial, left LCD window, or bezel-scale complications.
+
+
+2026-07-16 (cont. 6) — citizen_410 quality pass: corrected crop, real hand sprites, LCD font crash
+------------------------------------------------------------------------------------------------
+User reviewed the first citizen_410 iteration and asked for real improvement, not just tweaks:
+(1) the circle crop clipped black bezel on the right and showed white background on the left,
+(2) wanted actual raster hand images cut from the photo and animated, rather than drawn lines,
+properly centered, (3) wanted the date window's background replaced with matching LCD
+color/texture, same font as the watch's real LCD, black text with shadow, day on top/date below,
+centered.
+
+**Crop fix**: the single-circle fit (cx=432,cy=398,r=253) was measured by eye and came out ~10px
+too far left - explains the exact symptom (right side clipped, since true right edge needed
+more margin than the wrong-centered circle gave it; left side had ~15px too much margin,
+showing background). Fixed by measuring each of the 4 edges independently via tight zoomed
+crops (avoiding the crown/pushers, which extend past the true bezel circle on the right and
+kept skewing single-circle-fit attempts) rather than eyeballing one circle: corrected center
+(442,401), radius 248 - visually confirmed tight against the bezel all the way around this
+time.
+
+**Real hand sprites - much harder than expected, multiple false starts:**
+- First attempt reused the *inpainting* mask's line coordinates+widths for extraction too.
+  Result: badly contaminated sprites (bits of "RED ARROWS" branding, bezel numerals, chapter-ring
+  ticks). Root cause: those masks were deliberately wide (18-24px) for inpainting, where a wide
+  margin for angular error doesn't matter since it's just papering over removed pixels - but for
+  *extraction* with a precise thin mask, the same imprecise angle became immediately visible as
+  "captures wrong stuff nearby" rather than "reliably covers the real hand."
+- Several rounds of re-tracing hand tip coordinates by eye (even with grid overlays) kept
+  producing masks that visibly missed the real hand path when checked against a mask-overlay
+  visualization - eventually traced to comparing against debug crops too small/wrong-angled to
+  see the true hand extent. Also discovered the small red hand near "12"/the UTC text box is a
+  *separate* hand belonging to the small 24-hour UTC sub-dial (pivoting at the sub-dial's own
+  center ~(255,155)), not part of the main chronograph second hand - easy to conflate since both
+  are red and both pass near the main dial center.
+- What actually worked: wide, clear crops of *just* one hand's real extent at a time (not the
+  whole dial), tracing tip coordinates directly off those, using much narrower widths matching
+  the hands' true thickness (~15px hour, ~12px minute, ~4px second - vs. the 18-24px inpainting
+  widths) so the extraction mask itself excludes most surrounding text by construction rather
+  than relying on color filtering (hand color and bezel-text color are both white/silver -
+  color alone can't distinguish them). Final sprites still carry minor artifacts right at the
+  pivot end (small bleed from the UTC hand / center cap area) but those are hidden under the
+  separate center-cap circle object in the assembled face, so not visible on-device.
+- Sprites scaled by the same 410/496 factor as the background, wired up as `lv_image_create` +
+  `lv_image_set_pivot` + `lv_image_set_rotation` (replacing the previous `lv_line`-drawn hands).
+  Each sprite is cut from the photo at whatever angle it happened to be posed at (not pointing
+  "up"), so each needs its own as-photographed base-angle subtracted before applying the real
+  time-driven rotation - `HAND_HOUR_BASE_DEG`/`HAND_MINUTE_BASE_DEG`/`HAND_SECOND_BASE_DEG`,
+  measured from the same traced tip coordinates used to cut each sprite.
+
+**LCD window background**: sampled the real photo's own LCD-panel pixels (the exact region being
+covered), heavily Gaussian-blurred to erase the old static "TYO/009/35" text while preserving
+the panel's actual grey gradient/lighting/texture, used as `lv_obj_set_style_bg_image_src` on the
+date box instead of a flat placeholder color - now blends into the surrounding dial photo
+seamlessly instead of looking like a pasted-on box.
+
+**Custom LCD-matching font caused a full crash-loop - reverted, real fix deferred.** Sourced
+`DSEG14-Classic` (SIL OFL licensed, genuine 14-segment font - confirmed this dial's LCD really is
+14-segment alphanumeric, not simple 7-segment, by zooming into "TYO" and seeing the classic
+unlit-segment ghosting pattern) via `keshikan/DSEG` on GitHub, built Node+`lv_font_conv` from
+scratch (nvm install, no sudo needed) since neither was on this machine, converted to LVGL C
+format at 18px/4bpp. Compiled fine, but crashed immediately on every boot with an identical,
+repeatable `Guru Meditation Error: LoadProhibited` at `EXCVADDR: 0x00000010` - decoded the
+backtrace with `xtensa-esp32s3-elf-addr2line` (bundled with the PlatformIO toolchain, no download
+needed) straight to `lv_draw_sw_letter.c:176`, a null-`draw_buf->data` dereference inside
+`lv_font_get_glyph_bitmap()`'s caller - i.e. the font was returning no bitmap for a glyph LVGL
+tried to draw. First fix attempt: realized the placeholder text `"???\n--"` used `?`/`-`
+characters that weren't even in the font's converted range (only had space+digits+A-Z) - fixed
+the placeholder text AND expanded the font's range to include them for safety. **Crash persisted
+identically, same address, after that fix** - meaning missing glyphs weren't the (whole) story;
+something deeper in this specific font conversion is incompatible with this LVGL build's
+glyph-bitmap retrieval path (untested theories: bpp/compression option mismatch, static-bitmap
+caching flag, LVGL version-specific font table layout). Given the watch was in an actual
+crash-loop (unusable until reflashed) - not a cosmetic bug - treated getting back to a working
+state as the immediate priority over continuing to debug blind: reverted the date box to
+`&lv_font_montserrat_16` (proven-working elsewhere in this project), rebuilt, reflashed, confirmed
+clean boot. **The DSEG14 font work (fonts extracted, `lv_font_conv` toolchain now installed and
+working, `dseg14_bold_18.c` sitting in `assets/` unused) is preserved for a future, unhurried
+attempt** - next time, test the converted font file in isolation (a trivial single-label test
+face, not integrated into a real face) before wiring it into anything real, so a font bug doesn't
+put a whole face's build at risk again.
+
+Flash usage now 93.8%(ish, fluctuates slightly build to build) - real hand sprites plus the LCD
+background patch added meaningfully to the earlier 94.3%. Getting genuinely tight; worth
+compressing or trimming something before the next big asset addition to this face.
+
+Built + flashed clean (Montserrat date font), boot log verified, BLE connected. Not yet visually
+re-confirmed on-device - user is checking now.
+
+
+2026-07-16 (cont. 7) — crop STILL off after "fixing" it once; second, more rigorous correction
+------------------------------------------------------------------------------------------------
+User reported the exact same symptom again after the previous "fix" (442,401,r=248): still
+noticeable background on the left, still clipping black bezel on the right - just less severe
+than the original (432,398,r=253). Confirms the second attempt moved in the right direction but
+undershot.
+
+Root cause of *both* previous misses: measuring the circle by eye against a coordinate-grid
+overlay isn't precise enough for this - off by small amounts each time, in a way that "looks
+right" on quick visual check but is wrong on either close inspection or the real device's higher
+effective resolution. Also discovered along the way that automated single-threshold edge
+detection doesn't work either: the right side has real ambiguity between "black bezel" (what we
+want the crop boundary at) and "grey case metal" (further out, non-white but also not part of
+the bezel) - a simple "is it non-white background" scan finds the case edge, not the bezel edge,
+and the case is asymmetric (wider on the crown side).
+
+**What actually worked this time**: tight, fine-pixel-gridded zoom crops (10x zoom, 5px grid
+lines with coordinate labels) at each of the 4 cardinal edges individually, read by eye against
+the labelled grid rather than estimating from a full-dial overview. This is slower per-edge but
+each reading was internally consistent (left/right/top/bottom independently gave a radius within
+1px of each other: ~254-255), which the two previous whole-image-eyeball attempts never achieved.
+Also caught a second, previously-unnoticed error this same way: the earlier top-edge measurement
+(153) was cutting into the bezel's outer *red ring*, which starts at y=140, not where the black
+bezel numerals start (~155) - i.e. one of the earlier attempts wasn't just off-center, it was
+also using the wrong bezel-edge definition entirely (excluding the red ring from what counts as
+"the bezel"). Corrected circle: center (446,394), radius 254 (was 442,401,248; before that
+432,398,253) - visually confirmed tight against the bezel on all 4 sides this time, red ring
+included.
+
+**Full re-derivation, not just a background recrop.** Because the hand sprites and LCD-window
+patch are all measured relative to the crop's own coordinate frame, every corrected center means
+re-deriving all of them, not just the background image:
+- Hand tip coordinates: rather than re-tracing by eye a third time, converted the already-traced
+  tip coordinates from the previous crop into *original-photo* coordinates (add the old crop's
+  origin), then back into the *new* crop's local coordinates (subtract the new crop's origin) -
+  since these tips represent real, fixed, physical points on the watch, this round-trip is exact
+  and avoids repeating the error-prone manual tracing work a third time.
+- Hand base-angles recomputed from those same shifted tip coordinates (trig off the new true
+  center) rather than reused, since the previous base-angle numbers were relative to the old
+  (wrong) center.
+- LCD background patch: re-sampled and re-blurred from the new background image directly (window
+  position re-measured off the new 410x410 image with the same grid technique, came out at
+  roughly the same relative spot: 272-346,203-244, small few-px shift from before).
+- All three hand sprites re-extracted, re-scaled by the new background's own scale factor
+  (410/508 this time, vs 410/496 previously - the new crop is very slightly larger in source
+  pixels since the radius grew from 248 to 254).
+
+Built + flashed clean (Montserrat date font still in place - DSEG14 font issue from the previous
+entry not yet revisited), boot log verified, BLE connected same as before. Flash usage 95.0%
+(8961265 bytes) - marginally lower than the previous 95.0%/8969749 despite adding a slightly
+larger background, likely because the new (correctly-sized) crop let some hand sprites end up
+marginally smaller. Still very tight - at most one or two more meaningfully-sized assets before
+this needs a compression pass. Not yet visually re-confirmed on-device - user is checking now.
+
+
+2026-07-17 — citizen_410: new source photo, red-bleed-free minute hand, hand-length pass
+------------------------------------------------------------------------------------------------
+User supplied a fresh, higher-quality product photo (1008x1024 jpg, not the earlier 900x900 webp)
+plus a GIMP-cleaned minute-hand layer (red bleed from the chronograph second hand overlapping the
+minute hand in the photo, painted out by hand) and asked for the background, the minute hand, and
+overall hand proportions to be redone from this new source.
+
+**Background**: new 410x410 crop already supplied pre-made by the user (`citizen_bg_410_v2.png`
+in scratchpad) - verified the bezel-vs-content geometry looked right (ellipse-fit on the outer
+bezel edge came back essentially a perfect circle, axis ratio 1.001) before trusting it, then
+swapped straight into `face_citizen_410_dial_img.c`/`_dial_img_preview.c`. Diffed >50% of pixels
+against the previous background, confirming this is a real replacement, not a no-op.
+
+**Minute hand - avoided re-doing the fragile photo-alignment tracing from scratch.** The GIMP
+export (`minute_hand_clean.png`) came out as a 517x523 canvas with the real hand content occupying
+only a small ~180x115 region inside it (confirmed via the alpha channel) - initial attempts to
+template-match that content back against the source photo to recover an exact scale/position
+transform gave unreliable, low-confidence results (correlation peaks landing on plainly-wrong
+areas of the photo). Rather than burn more time on that, dropped the "recover the true photo
+scale" goal entirely: found the hand's own pivot (rounded base end, identified by width profile
+along its principal axis) and tip (tapered point) directly in the cleaned cutout's own pixel
+space, then uniformly scaled+positioned it to hit a *chosen* target length in the 410-canvas
+frame instead of an inferred one. This sidesteps the whole alignment problem - the hand's shape is
+real photo content either way, only its final size in the canvas is a design choice, not something
+that needs forensic recovery.
+
+**Hand-length pass, all three hands.** User feedback on an early proportions preview: minute and
+second hands were reaching almost to the bezel (way past the dial's main hour markers), hour
+wasn't clearly shorter than the other two, said to fix so minute/second reach the *middle* of the
+main hour markers and hour reads clearly shorter. Measured the real target radius by overlaying
+concentric rings on the background and reading off where the big lume markers sit (~100-150px
+from center) - picked 140px as the minute/second target and 95px for hour. Concretely:
+- Minute: fresh cleaned cutout, uniformly scaled so pivot-to-tip = 140px. New pivot (12,82), new
+  base angle 56.6 deg (recomputed from the cutout's own geometry, since this is a new crop with a
+  different as-photographed angle than the old sprite).
+- Hour: previous real sprite, uniformly scaled 109px -> 95px (pivot (75,71), base angle unchanged
+  at 313.8 deg - a uniform scale doesn't change orientation).
+- Second: previous real sprite, uniformly scaled 116px -> 140px (pivot (7,6), base angle unchanged
+  at 180.8 deg).
+Verified with a Python/PIL composite (decoding the real LVGL assets back to PNG, replicating the
+exact pivot/rotation/base-angle math from `citizen_410.c`) at three test times (10:10:30, 12:00:00,
+3:15:45) before touching the firmware - 12:00:00 in particular confirms z-order is right (hour
+behind minute behind second, all three visible stacked when overlapping), which needed no code
+change since it already falls out of LVGL's default "later-created child draws on top" behaviour
+(hour_hand created first, then min_hand, then sec_hand).
+
+**LCD date window moved.** While placing the new background, found the grey LCD-panel patch
+(previously at canvas x272-346,y203-243) no longer lined up - the new photo's window sits further
+left. Re-measured by eye against a fine pixel grid: real panel is x241-306,y202-250. Re-sampled and
+re-blurred the LCD background patch from this new location, updated `DATE_BOX_X/Y/W/H` in
+`citizen_410.c` to (244,205,60,43) (small inset from the true panel edges, same margin style as
+before).
+
+Regenerated all six changed assets through `tools/facegen/lvgl_img.py`'s
+`encode_from_rgba`/`format_c_array` (same planar-RGB565(+alpha) format as every other hand-authored
+asset in this repo - see the two gotchas logged earlier in this file). Built clean for
+`lolin_s3_2_06`, flash usage 95.0% (8969489 bytes, essentially flat vs before). Flashed via
+`pio run -t upload`, boot log confirmed clean (AXP2101 battery read fine, `Setup done`, no
+crash-loop). Not yet visually confirmed on the actual device - user is checking now.
+
+
+2026-07-17 (cont. 2) — citizen_410: third source photo (v3), rotation-error investigation
+------------------------------------------------------------------------------------------------
+User supplied yet another photo (`CitizenE-DriveRedArrowsRAF2.jpg`, same 1008x1024 as the v2
+source) and asked to use it instead, plus flagged the face as looking "out by about 1.6 degrees"
+and asked for confirmation+fix. This photo's main dial has **no baked-in hour/minute hands at
+all** (only the small UTC and 24h sub-dials show their own static hands) - a real win, since it
+means no inpainting is needed this time, unlike every previous source photo.
+
+**Rotation investigation - the outer-bezel-edge fit is the wrong reference for this.** First
+measured rotation the same way as the circularity check earlier this session (ellipse-fit on the
+outer bezel edge) and got a plausible-looking but, it turns out, *wrong* center - cross-checking
+against the "9"/"3"/"6" numerals (which by construction sit at exactly 270/90/180 degrees on a
+real watch dial) with that center gave inconsistent, mixed-sign deviations (-0.5, +1.0, +1.2 deg)
+that don't fit a single rotation value - the signature of a bad center, not a real rotation.
+Root cause: this is the exact crown/pusher bias already logged earlier in this file for the v1/v2
+crops - the bulges these add to one side of the bezel skew an edge-only circle/ellipse fit away
+from the dial's true optical center.
+
+**What actually resolved it**: jointly fit center (cx,cy) + rotation via least-squares against
+the 3/6/9 numerals, then *independently validated* that fit against 8 more reference points (the
+lume hour markers at 1/2/4/5/7/8/10/11 o'clock, not used in the fit) - residuals came back small
+and centered near zero (mean 0.2 deg, std 0.44 deg) across all 11 points, which is a real,
+over-determined confirmation rather than a 3-equations-3-unknowns coincidence. Conclusion: this
+photo's actual content rotation is small, ~0.2-0.3 deg, not 1.6 - the "1.6 deg" figure look wasn't
+reproducible from the dial geometry itself, using the same method on the *previous* (v2)
+background gave the same small ~0.2-0.3 deg answer too. Corrected it to ~0.00 deg anyway (free to
+fix once measured) by rotating the source photo by the fitted offset before cropping. **Flagged
+to the user that if they still see a ~1.6 deg discrepancy after this, it's more likely coming from
+a hand base-angle calibration error (measured by tip-tracing, a fuzzier process) than from the
+background photo's rotation** - worth them checking hand-tip-vs-tick-mark alignment on the actual
+device specifically, if the discrepancy persists, so that can be pinned down separately.
+
+**Rebuilt background pipeline**: rotate source by fitted offset around the fitted center, crop a
+998x998 square (radius 499) around it, resize to 410x410 - same recipe as every previous
+iteration, just with a properly cross-validated center/rotation this time instead of a single
+biased edge fit. LCD date window relocated *again* (third different position across three source
+photos) - true panel this time measured at x250-303,y202-274 (taller than before), box kept
+text-sized (53x44, same convention as every prior iteration) and top-aligned within it rather than
+stretched to fill the taller panel. Hand assets (hour/minute/second, tuned earlier this session)
+reused unchanged - verified their target lengths (140/140/95px) still land in sensible places
+against the new background's marker positions (same physical watch, similar crop scale) before
+committing to that.
+
+Regenerated dial/preview/LCD-bg assets, rebuilt clean for `lolin_s3_2_06` (flash usage 95.0%,
+8968993 bytes, flat), flashed via `pio run -t upload`, boot log clean (battery reads fine, no
+crash-loop). Not yet visually confirmed on-device - user is checking now.
+
+
+2026-07-17 (cont. 3) — citizen_410: bigger LCD font, day/date divider, left LCD battery %
+------------------------------------------------------------------------------------------------
+User asked to (1) grow the day/date font to fill the LCD window more, (2) add the horizontal
+divider line the real watch has between day and date, (3) wire up the left LCD window (previously
+untouched, still static photo content) to show battery %, same font size.
+
+Went from `lv_font_montserrat_16` to `_20` for both windows (all sizes 8-48 are enabled in
+`lv_conf.h`, so this was just a constant change, no new font work needed). Split the single
+"\n"-joined 2-line date label into two separate single-line labels (`day_shadow`/`day_label` and
+`date_shadow`/`date_label`) so a divider bar (`date_divider`, a plain 2px-tall `lv_obj`) could sit
+precisely between them - couldn't do that cleanly with one auto-wrapped multi-line label. Grew the
+date box 53x44 -> 53x54 to fit the bigger font without crowding (true panel allows up to y271, so
+there was headroom).
+
+**Left LCD window measured for the first time** (x95-158,y200-231 true panel) - inset the box to
+x100-154,y203-228 specifically because a small red gauge-pointer element (part of the
+USA/EUR/JOU/CHN sub-gauge) sits just outside the panel at x85-93 and was bleeding red into the
+blurred background patch on a first attempt (margin=10 blur sample pulled it in) - fixed by
+shrinking the blur sample margin to 3px, tight enough to avoid the red but still enough to erase
+the panel's original static content. New `face_citizen_410_lcd_bg_left` asset (54x25), new
+`batt_box`/`batt_shadow`/`batt_label` objects, same shadow-emboss style as the date window.
+`update_status_citizen_410()` was already being called with the real `watchBatteryPercent` value
+(wired up back on 2026-07-12, just never displayed anywhere in this face) - implemented it to set
+the new label text (`"%d%%"`) instead of the empty stub it had been since this face's creation.
+
+Sanity-checked the layout before flashing by approximating the label positions/font size with a
+non-LVGL TTF (KaTeX Bold, closest thing available on this machine, not a real montserrat match) at
+20px over the actual background+LCD-patch composite - confirmed neither label overflows its box
+and the divider sits in a sensible place, before trusting it on real hardware.
+
+Built clean (flash usage 95.1%, 8973549 bytes - the extra text label/font/asset cost ~4KB), took
+notably longer to build than usual (~169s vs the usual ~35-40s) - full FrameworkArduino rebuild,
+unclear why (header touched was this face's own, shouldn't affect framework compilation units);
+not investigated further since the build still succeeded and this isn't the first time PlatformIO
+has done a wider rebuild than expected on this project. Flashed via `pio run -t upload`, boot log
+clean (battery read 29%, matches what should now be showing on the left LCD). Not yet visually
+confirmed on-device - user is checking now.
+
+
+2026-07-18 — citizen_410: minute hand pivot/counterweight bug fixed
+------------------------------------------------------------------------------------------------
+User feedback after checking the 2026-07-17 build on-device: minute hand pivot point was wrong,
+counterweight possibly erased, second hand too long and unreadable (looks black, should be red),
+hour hand barely visible, left LCD battery/date layout requests. Also asked whether the original
+source images were still accessible for re-diagnosis - they were, in two old session scratchpads
+under /tmp/claude-1000/-home-greg/{ae1adad1,d2df0337}.../scratchpad/ (source photos + the GIMP
+minute-hand cutout + every intermediate mask/grid PNG from the original dial-fitting work).
+
+**Root cause found by decoding the current on-flash sprite back to PNG** (via a standalone
+RGB565+alpha decoder matching tools/facegen/lvgl_img.py's planar layout, since that shared script's
+regex only matches the `_data_0[]` naming convention used by the 75_2_410 generator, not the
+hand-authored `_data[]` arrays in this face - didn't touch the shared script, just wrote an
+equivalent one-off parser). Confirmed two real bugs, not just a perception issue:
+- **Zero red pixels** in the shipped minute-hand sprite (verified against 381 red pixels in the
+  original `CitizenE-DriveRedArrowsRAFMinute2.png` cutout) - the red pivot-hook counterweight was
+  fully lost.
+- **The black base cap and the blade are two disconnected pieces** with a visible gap between them,
+  and the previous session's pivot (12,82) landed inside the disconnected cap, nowhere near the
+  blade - a visible artifact of the "find pivot and tip independently in the cutout's own pixel
+  space" approach used to sidestep the alignment problem the day before: that approach implicitly
+  treated the cap and blade as one shape but the actual extraction/positioning step that produced
+  the shipped sprite split them.
+
+**Found the true pivot by inspection, cross-checked numerically.** Zoomed into the original cutout
+at 6x and found an actual small screw-hole visible at the center of the red hook loop, at ~(257,259)
+in source-image space - this is a real mechanical feature (the axle the hand pivots on), not a
+guess. Cross-checked against a width-profile scan along the shape's principal axis (same method
+used 2026-07-17 for the hour/second hands): the widest point of the base region landed at ~(255,261)
+- 2-3px of the by-eye estimate, good agreement between two independent methods.
+
+**Rebuild**: connected-component check on the original cutout confirmed it's genuinely one piece
+(4134px single component, some sub-10px anti-aliasing specks) - so re-cropped the *entire* opaque
+region as a single crop (not a re-derived mask), keeping cap+hook+blade+color intact. Farthest
+opaque point from the new pivot is the tip, at source-space distance 162.29px; uniformly scaled the
+whole crop by 140/162.29 (0.8627x) to preserve the existing 140px pivot-to-tip target (unchanged -
+length wasn't touched here, that's a separate open item since the user also flagged the second hand
+as too long and wants both re-measured against the inner bezel tick ring, not done yet). New sprite
+150x100, new pivot (31,76). Orientation preserved exactly (no rotation applied, pure crop+scale of
+the same connected shape), so the existing HAND_MINUTE_BASE_DEG (56.6 deg) needed no change.
+
+**Verified two ways before flashing**: (1) visually, marking the new pivot on a 4x zoom of the
+rebuilt sprite - lands exactly on the screw-hole in the middle of the red hook, cap and blade fully
+connected, red intact; (2) a Python/PIL composite against the real (non-preview, 410x410) dial
+background at 12:00:00 and ~10:10 - hand points at the correct tick positions at both test angles,
+confirming the preserved base-angle math still holds after the recrop.
+
+Updated `citizen_410.c` min_hand pos/pivot from (12,82)->(31,76) to match. Built clean, flash usage
+unchanged (~95%), flashed via `pio run -t upload`, boot log clean via a manual RTS-toggle reset read
+(ESP-ROM banner through "Starting up device", no panic/backtrace).
+
+User confirmed the direction was right and gave more feedback in the same pass: second hand too
+long and reads mostly black (should be red), hour hand barely visible, plus a batch of LCD layout
+requests (drop the "%" on battery and shift it over, grow+lower the date number, and - after asking
+- switch the day/date/battery font from Montserrat to the dseg14_bold_18 LCD font that's been sitting
+unused in this face's assets since it was generated. Also clarified second-hand-vs-hour-hand are two
+separate bugs, not one being mistaken for the other.
+
+**Second hand rebuilt the same way as the minute hand, from the *original* full studio photo**
+(`CitizenE-DriveRedArrowsRAFA_900x.webp`, not the v2/v3 crops - the hour/second hands were never
+migrated off this original photo, only the background and minute hand were). Confirmed the same
+category of bug as the minute hand: the shipped sprite decoded to mostly near-black RGB for most of
+its shaft (only tip and base ends kept real red), most likely a color-extraction artifact from the
+original "polar/radial red-pixel scan" approach struggling on a 1-2px-wide red line against a dark
+background. Re-extracted using a red-pixel mask + local dilation (to catch the black outline and the
+screw-hole neighbourhood) + connected-component filtering (keeps just the needle+hook island, drops
+the nearby AL-1/AL-2/TIME red text a plain bounding-box crop would've caught) - this preserves the
+real photographed red throughout, not just fragments of it. Found the true pivot the same way as the
+minute hand: a visible screw-hole at the centre of the red hook counterweight decoration, this time
+at crop-local (85,69). Uniformly scaled to the same 140px pivot-to-tip target as the minute hand
+(user confirmed that reach is accurate against the inner bezel tick ring, so re-used it rather than
+re-deriving from scratch). New sprite 105x178, new pivot (70,54).
+
+**Base angle recomputed, not reused** - unlike the minute hand, this crop's pivot-relative
+orientation doesn't match the old sprite's, so the old HAND_SECOND_BASE_DEG (180.8) would point the
+wrong direction. Computed the new native angle geometrically from the crop's own pivot->tip vector
+(208.8 deg) and verified it two ways: (1) cross-checked the same formula against the *unchanged*
+minute hand base angle (56.6) and it reproduced 57.6 within rounding - consistent; (2) built a
+proper LVGL-accurate composite check this time. First attempt at this reused a Python/PIL rotate()
+call directly with the LVGL rotation value, which is wrong - PIL's rotate() is counter-clockwise-
+positive, LVGL's lv_image_set_rotation is clockwise-positive, so that first composite had the hand
+sweeping backwards (caught it by testing 4 angles instead of 1-2: three didn't land where a real
+clock hand would). Fixed by negating the angle before calling PIL rotate(); re-tested at all four
+cardinal positions (0/90/180/270 = 12/3/6/9 o'clock) against the real dial background and all four
+landed correctly this time. Worth remembering for any future from-scratch hand rebuild: verify a new
+composite-check script against >=3 non-trivial angles, not just 0 deg, since 0 deg can look right by
+coincidence regardless of rotation sign.
+
+Updated `citizen_410.c` sec_hand pos/pivot (7,6)->(70,54) and HAND_SECOND_BASE_DEG 180.8->208.8.
+Built clean, flashed via `pio run -t upload`, boot log clean (RTS-toggle reset read, ESP-ROM banner
+through "Starting up device", no panic/backtrace).
+
+**Hour hand rebuilt too, same "dim instead of bright" bug as the second hand's color problem, plus
+contamination.** Decoded the shipped sprite and found it averaged RGB ~30-150 (a dim muddy gray)
+across its whole visible area, never reaching real white, plus red bleed near the pivot from the
+neighbouring second-hand hook - explains "only some pixels available when I look hard" exactly:
+against a black dial, a dim gray hand is nearly invisible except its brightest anti-aliased edges.
+Root cause looks like the same class of bug as the other two hands: a lossy extraction from the
+original studio photo (`CitizenE-DriveRedArrowsRAFA_900x.webp`) that didn't preserve real
+brightness/color.
+
+Re-extraction was harder than the other two hands because white isn't a distinctive color on this
+dial (numerals, lume markers, tick marks, and the "USA/EUR/JIC/CHN" city-selector sub-dial text are
+all white too, and that sub-dial sits immediately next to the hour arrow's base) - a plain
+white-threshold + dilate + connected-component pass kept bridging to that sub-dial text no matter
+how the crop was framed. Fixed by two passes: first an *undilated* white mask to get clean,
+unbridged fragments, filtered out any fragment whose bounding box fell in the known text zone
+(sat with a fixed pixel offset from the sub-dial's own known position), then dilated only the
+kept fragments to re-merge the arrowhead's own pieces (it's visually split into several bits by the
+hand's window-cutout black divider line) without re-bridging to the text.
+
+**The connecting tail down to the pivot couldn't be extracted at all** - traced it in the source
+photo and that whole region actually is a thin near-black tail against dark dial texture, below any
+reasonable extraction threshold, not a lossy-extraction artifact this time. Since a black tail
+against a black dial is visually indistinguishable from transparent-showing-black-dial, filled it
+with a small synthetic dark-grey polygon bridging the arrowhead's base to the mechanically-correct
+pivot point instead of trying to trace individual real pixels - same visual result, guarantees the
+hand actually rotates around the true dial centre rather than leaving the bright arrowhead
+disconnected from its rotation point (checked this mattered: an early attempt using the pivot
+implied by the extracted fragments alone left the arrowhead floating ~50px from where the tail
+fragment ended).
+
+Pivot placed at the shared dial-centre offset (this hand's crop was framed so that point falls
+inside the canvas) rather than a screw-hole - unlike the other two hands, no screw-hole is visible
+for this one, it's hidden under the arrowhead itself in the photo. Uniformly scaled to the existing
+95px pivot-to-tip target (hour hands are shorter than minute/second by design, target unchanged).
+New sprite 107x74, new pivot (94,61).
+
+**Base angle recomputed** (306.3 deg, not the old 313.8) for the same reason as the second hand - a
+fresh crop doesn't share the old sprite's pivot-relative orientation. This time verified the
+composite check properly from the start (the second-hand rebuild caught a PIL-vs-LVGL rotation-sign
+bug the hard way): rotate() angle negated to match LVGL's clockwise-positive convention, checked at
+0/90/270 deg (12/3/9 o'clock) against the real dial background - all three landed correctly.
+
+Updated `citizen_410.c` hour_hand pos/pivot (75,71)->(94,61) and HAND_HOUR_BASE_DEG 313.8->306.3.
+Built clean, flashed via `pio run -t upload`, boot log clean (RTS-toggle reset read, ESP-ROM banner
+through "Starting up device", no panic/backtrace).
+
+**LCD layout/font pass, all four remaining items done together** since they're coupled (font swap
+changes the metrics the other three depend on): switched `DATE_FONT`/`BATT_FONT` from
+`lv_font_montserrat_20` to the `dseg14_bold_18` LCD-style font that's been sitting generated but
+unused in this face's assets since it was first added - real 14-segment digital-display look,
+user confirmed wanting the swap earlier this session. Battery: dropped the trailing "%" from both
+`lv_label_set_text_fmt` calls (init and `update_status_citizen_410`), and added a
+`BATT_EXTRA_SHIFT_X` (6px) x-offset on top of the existing centre alignment - centering the now-
+shorter "100" instead of "100%" in the same box already shifts it right by about half a character,
+this adds one more half on top per the user's explicit "then move it another half character over".
+Date: moved down 4px (label y 29->33, shadow 30->34) and given a 1.15x (`transform_scale` 294,
+LV_SCALE_NONE=256=100%) enlargement on both date_shadow/date_label per "the date number could go
+down a bit more and made a little bigger" - grew `DATE_BOX_H` 54->58 for headroom (real panel allows
+up to y271, box bottom now at 261, still inside it) to give the enlarged text room without crowding
+the box edge. Note the DSEG font swap changes the *day* label's look too even though only date/
+battery were asked to be resized - accepted as expected fallout of a global font swap, not adjusted
+further since only date/battery had explicit sizing asks.
+
+Confirmed shadow coverage (task from earlier this session) needs no code change: day_shadow,
+date_shadow, and batt_shadow already existed for all three LCD text elements (offset dark copy
+underneath, same emboss technique) before this pass, and there are no other `lv_label_create` calls
+anywhere else in this face - the LCD-window text is the only text this face draws itself.
+
+Built clean (RAM 45.3%, flash 95.8%, both fit), flashed via `pio run -t upload`, boot log clean
+(RTS-toggle reset read, ESP-ROM banner through "Starting up device", no panic/backtrace). Not yet
+visually confirmed on the actual device - user is checking now. This closes out the full batch of
+2026-07-17 feedback (hand pivots/colors/lengths, LCD layout/font) in one session; next step is
+on-device confirmation and likely a fresh round of fine-tuning from what the user sees.
+
+
+2026-07-18 (cont.) — citizen_410: DSEG14 font crashed the board, reverted to Montserrat
+------------------------------------------------------------------------------------------------
+The LCD font swap above did NOT survive contact with hardware - user reported the watch stuck in a
+boot/crash loop shortly after flashing. Serial log (captured via the usual RTS-toggle reset trick,
+this time read for longer than the usual quick glance) showed the real cause: boots fine, prints
+the v6.3/MAC banner, then `Guru Meditation Error: Core 1 panic'ed (LoadProhibited)` with
+`EXCVADDR: 0x00000010`, in `draw_letter_cb` (lv_draw_sw_letter.c:176) via the label draw path - a
+NULL-pointer-plus-small-offset dereference while blending a glyph bitmap (`draw_buf->data` where
+`draw_buf` = `lv_font_get_glyph_bitmap(...)` returned NULL). Decoded with
+`xtensa-esp32s3-elf-addr2line -pfiaC` against `firmware.elf` from the crashing build (kept the
+`.pio` build dir around specifically because it still matched the flashed binary - if that gets
+cleaned before diagnosing a crash, the addresses in a serial dump become useless).
+
+Root cause: `dseg14_bold_18` - this was the DSEG14 LCD-style font's actual *first-ever* use in this
+face (generated a while back, declared, but never wired into a live label until this session's font
+swap for day/date/battery). Something in that font's converted data isn't compatible with this
+project's LVGL 9.3 build - skimmed the glyph_dsc table for the obvious things (glyph ids, cmap
+ranges, bitmap_index math) and nothing jumped out as blatantly corrupt, glyph coverage looked right
+for the day-name/digit text actually being rendered, so didn't fully pin down *which* glyph or *why*
+`lv_font_get_glyph_bitmap` came back NULL - didn't chase it further once the fix was obvious.
+
+**Fix: reverted DATE_FONT/BATT_FONT back to Montserrat** - `lv_font_montserrat_22` for the date (a
+built-in, known-good font, and bumping 20->22 satisfies the original "make it a little bigger" ask
+without needing DSEG at all), `lv_font_montserrat_20` for battery (unchanged size, no bigger ask
+there). Dropped the `transform_scale` 1.15x hack on the date labels too since it was only there to
+compensate for DSEG's fixed 18px - not needed once the font itself is a normal built-in size. Kept
+`DATE_BOX_H` at 58 (headroom for montserrat_22's slightly taller line) and the battery %-removal +
+`BATT_EXTRA_SHIFT_X` position changes (unrelated to the crash, those are just label text/position,
+not font machinery). Rebuilt, reflashed, watched the serial log for a full 10s past the point where
+it used to panic this time instead of the usual quick glance - held clean, no crash-loop.
+
+**DSEG14 font is parked, not fixed** - if the LCD-digital look is still wanted, it needs real
+investigation (possibly regenerating it with a different lv_font_conv version/target, or bisecting
+which specific glyph triggers the NULL return) before it goes anywhere near a live label again. Add
+a scratch/throwaway label somewhere non-critical to test a font change in isolation before wiring it
+into the main UI, rather than swapping in three labels at once next time - would have made this
+failure much cheaper to isolate.
+
+
+2026-07-18 (cont. 2) — citizen_410: hand shrink, divider removed, shadow made prominent
+------------------------------------------------------------------------------------------------
+Further feedback after the crash-and-revert: minute/second hand tips still too long (should sit
+inside the inner bezel tick marks, not reach/touch them - the 140px target from earlier this
+session was apparently still too generous once seen on real hardware), no divider line wanted under
+the day/date number, and the day/date/battery shadow effect turned out to be so subtle the user
+hadn't even noticed it was there - asked for a real, prominent, clearly-offset "LCD text shadow"
+look instead, disconnected from the main text rather than a near-1px emboss.
+
+**Hands re-scaled, not re-extracted.** Since the minute/second sprites built earlier this session
+already have correct pivots (on the real screw-holes), correct color, and correct connectivity, a
+uniform image re-scale around the existing pivot is enough - no need to redo the photo-forensics.
+Scaled both from 140px pivot-to-tip down to 128px (factor 0.9143), pivot recomputed as
+old_pivot*factor (minute (31.06,75.91)->(28.4,69.4), second (70.2,54.2)->(64.2,49.6)) - this keeps
+the pivot at the *same relative position on the hand's geometry* (satisfies "keep pivot points on
+same place on hands") while shrinking the whole sprite uniformly. Base angles unchanged (a uniform
+scale doesn't rotate anything). Sanity-checked with one composite render at 10:10:30 before
+flashing - both hands land well short of the inner tick ring now. 128px was a judgement call, not a
+precise measurement (no way to read the exact tick radius off the real screen from here) - flagged
+to the user as a first cut, may need another round.
+
+**date_divider removed entirely** - deleted the `lv_obj_create` for it and its static var; no
+replacement, just gone.
+
+**Shadow made properly prominent on all three labels** (day, date, battery) - previously the shadow
+copy was offset by only ~1px from the main text (day_shadow (1,2) vs day_label (0,1) - barely
+distinguishable, which is exactly why the user hadn't noticed it existed). Pushed the shadow copies
+out to a clearly-separated (+4,+4)-ish offset from each main label instead. This meant growing the
+box heights for headroom: `DATE_BOX_H` 58->62, `BATT_BOX_H` 25->27 (both still comfortably inside
+the true LCD panel bounds measured earlier this session) since the shadow copy now sits visibly
+lower than the label instead of nearly on top of it.
+
+Built clean (flash 95.8%, unchanged), flashed via `pio run -t upload`. This time watched the serial
+log for the full 10s past the point where the DSEG crash used to hit, not just a quick glance -
+clean boot, `AXP2101 battery: 6%, charging: 1` (on charger, different state than earlier reads -
+fine, unrelated). Not yet visually confirmed on-device - user is checking now, plus still owes a
+closer look at the hand pivots from the previous round ("will check more later").
+
+User also asked whether a separate isolated test was being suggested for the DSEG14 font (yes -
+see the "DSEG14 font is parked, not fixed" note above) - confirmed that's the recommended next step
+if the LCD-digit look still matters, not started yet, no urgency.
+
+
+2026-07-18 (cont. 3) — citizen_410: shadow tuned down, hour hand junk fixed, minute hand red removed
+------------------------------------------------------------------------------------------------
+More feedback after the previous round: hand sizes now "looking better" (no change requested), but
+the new shadow was too far/too dark ("coming in a bit and made lighter"), the hour hand had visible
+junk around its outside edge, the minute hand still showed red, and the user asked to see the real
+device at 09:50 specifically to check the right-hand (date) LCD window with the hands clear of it,
+plus said no lines wanted above/below the LCD characters (noted but not diagnosed - no border/
+underline styling found anywhere in the label code, nothing obvious to fix blind; asked user to
+point at it directly once they can see the 09:50 render, cheaper than guessing further).
+
+**Shadow dialed back**: offset (+4,+4) -> (+2,+2) relative to each main label on all three (day,
+date, battery), color 0x3a3a3a -> 0x5a5a5a (lighter grey).
+
+**Hour hand junk root-caused and fixed**: the darkish-pixel-inclusion step from the 2026-07-18
+rebuild (added to recover the black outline near the kept white arrowhead fragments) dilated far
+enough right to bridge into the neighbouring 24h sub-dial's tick marks, pulling in their alternating
+light/dark pattern as a zigzag noise blob along the hand's right edge. Fixed by capping that
+inclusion to x<415 in source-photo space (past the real arrowhead's right edge, short of the tick
+marks) - tip/pivot came out numerically identical to before (94,61), confirming the junk was pure
+disconnected debris, not real hand geometry.
+
+**Minute hand red removed entirely**: re-examined why "still red" after the counterweight-restore
+fix - the red hook sat right where the pivot is, matching the exact spot the 2026-07-17 GIMP cleanup
+was targeting (that cleanup existed specifically to remove second-hand chronograph red bleed off
+this same hand). Safer to treat as leftover bleed than a genuine design element rather than keep
+guessing - recolored all red-ish pixels (loose threshold to catch anti-aliased fringe, not just
+solid red) to near-black. Hand now reads plain black/silver, matching the hour hand.
+
+**Time temporarily forced to 09:50:00 (2026-07-18)** in `hal/esp32/app_hal.cpp`'s RTC init, right
+after the normal RTC->watch time read, clearly marked `TEMPORARY` in a comment - so the user could
+check the date LCD window with the hands out of the way. **This runs on every boot until removed** -
+must be deleted (or the RTC re-synced) once the check is done, otherwise the watch will keep
+resetting to this fixed time on every reboot instead of keeping real time.
+
+Built clean, flashed via `pio run -t upload`, watched serial for the full 10s again - clean boot,
+`AXP2101 battery: 23%, charging: 1`. Not yet visually confirmed on-device - user is checking now,
+including the date LCD window at 09:50 and the "lines above/below characters" concern.
+
+
+2026-07-18 (cont. 4) — citizen_410: watch body/case added behind the dial
+------------------------------------------------------------------------------------------------
+New idea from the user: add the watch's own body (crown, pushers, bracelet) back in behind the
+dial, which had been a tight circular crop on plain black since the face was first built. Scoped
+carefully through discussion first: scale must match the *existing* dial exactly (no moving/
+rescaling the dial itself - it's the anchor), clip everything outside the 410x494 draw area rather
+than trying to fit the whole watch in, and crown loss was explicitly accepted as fine.
+
+**Pattern-matched instead of eyeballed.** User specifically asked for this rather than a manual
+grid-overlay crop (the method that produced the "crown/pusher bias" problem logged earlier this
+project for a different photo). Used OpenCV: decoded the *existing* face_citizen_410_dial_img back
+to a PNG, Canny-edge'd both it and the full-body source photo
+(`CitizenE-DriveRedArrowsRAFA_900x.webp` - confirmed this is where the dial content originally
+traces back to, just never cropped for anything beyond the dial itself), then did a multi-scale +
+multi-rotation `cv2.matchTemplate` search (scale ~0.65-1.05 coarse, refined to 0.76-0.86 fine, angle
++-3deg) to find the transform that makes the *existing* dial align with its own appearance inside
+the full photo. Best match: scale 0.804, rotation 0.0deg. Verified with a 50/50 pixel blend overlay
+before trusting it - bezel scale numbers and tick marks lined up cleanly, only minor softness, no
+visible doubling.
+
+**First attempt only showed the top/bottom letterbox** (crown correctly absent - confirmed clipped
+outside the 410px width at this scale, exactly as expected given zero horizontal margin was
+available; pushers partially visible at the sides). User pointed out the four triangular corners of
+the *dial's own 410x410 square* (outside its inscribed circle, inside the square canvas) were still
+solid black - initially misread this as "no body content there" (checked the wrong region, the
+414x494 screen's outer letterbox, and confirmed via zoomed crops that region genuinely is white
+studio background) before realising the actual ask was about the *dial asset's own* corner masking:
+`face_citizen_410_dial_img` was originally encoded as opaque RGB565 with those 4 corners painted
+solid black (correct/harmless when the canvas behind it was *always* black - see the original
+"real alpha would be redundant" note from when this face was first built) - now that there's real
+body content behind it, that opaque black hides it.
+
+**Fix: re-encoded the dial as RGB565+alpha**, corners set fully transparent, circle content
+untouched. Circle boundary re-measured directly off the existing asset (360-sample radial scan
+from centre (205,205): median radius 205.0, matching the canvas half-width as expected) with a
+1.5px feathered edge to avoid a hard seam. New `face_citizen_410_body_bg` asset (410x494, opaque,
+no alpha needed since it's the base layer) drawn full-screen *behind* the dial. Body photo's own
+white background flood-filled to black from the image borders (not a blanket brightness threshold -
+anchored at the four edges specifically so it doesn't eat into bright/reflective metal that's
+actually on the watch).
+
+**Flash budget didn't fit at first** - alpha dial (504300B) + new body bg (405080B) needed ~570KB
+more than the ~321KB free (was already at 95.8%). User chose to disable two of the other enabled
+`_410` faces to make room rather than compress harder: `ENABLE_FACE_228_410` and
+`ENABLE_FACE_1167_410` in `hal/esp32/app_hal.h` (commented out, not deleted, easy to re-enable).
+Freed ~1.6MB - well over what was needed, landed at 84.8% after adding the new assets back in
+(was 95.8% before any of this, so net *more* headroom than the session started with).
+
+Built clean, flashed via `pio run -t upload`, boot log watched for the full 10s again - clean,
+`AXP2101 battery: 100%`. **User confirmed on-device: "Very good."** - body/case background, the
+transparent-corner fix, and the pattern-matched alignment all look right on the real screen. More
+work planned but not yet specified - see the "pinned" open-questions section earlier in this file
+(lines above/below LCD characters, hand pivot/length further checks, DSEG14 font, and the temporary
+09:50:00 time override in `hal/esp32/app_hal.cpp` which is *still in place* and still needs removing
+or the RTC re-syncing).
+
+
+2026-07-18 (cont. 3) — face swap (174_410 -> 1167_410) + 2151_410 weather-temp bug fixed
+------------------------------------------------------------------------------------------------
+User asked to reinstate one of the two faces dropped earlier this session for citizen_410's flash
+budget (see the "Flash budget didn't fit at first" entry above), giving up a different currently-
+enabled face instead of re-cutting the budget. Faces identified visually (sent previews via
+`watchface.png` per face dir, not by macro name/number - numbers meant nothing to the user):
+**1167_410** (cyan tech face, weather+battery+activity rings) reinstated, **174_410** (plain BPM/
+steps/kcal digital face) disabled to make room. `228_410` (Santa/moon) stays off, untouched.
+`hal/esp32/app_hal.h` ESPS3_2_06 block updated accordingly. Built clean: **flash 83.8%** (well
+under budget - 1167_410 is smaller than the citizen_410 additions that prompted the original cut).
+Flashed, boot-log clean, BLE reconnected same-session. **User confirmed the right faces are
+disabled** afterward.
+
+Side finding, not acted on: `ENABLE_FACE_1041_410` in `app_hal.h` is a phantom - defined but with
+no corresponding `src/faces/1041_410/` implementation and zero other references anywhere in the
+codebase. It compiles fine (just an unused macro) but produces no actual watchface on-device. Not
+in scope to fix/remove now, just flagging it exists.
+
+**2151_410 ("blood moon") weather temperature bug - same class of bug as the red_magic_410 fix
+above: static placeholder digits, never wired to real data.** `update_weather_2151_410(temp, icon)`
+only ever updated the weather icon; the `temp` parameter was silently discarded, and the three
+temp-digit objects (`face_2151_410_7/8/9_207436`) sat permanently on their initial static glyph.
+The digit-glyph strip asset needed for this already existed
+(`face_2151_410_dial_img_7_207436_group[0..9]`, confirmed by decoding index 0 with
+`tools/facegen/lvgl_img.py` - a clean "0" glyph), it just wasn't being indexed anywhere.
+
+Confirmed the digit place-value convention (higher x = less significant digit) **within this same
+face's own already-working code** (steps: x=152/133/114 for ones/tens/hundreds; battery: x=123/
+105/88) rather than assuming it carries over from red_magic - it does, cross-checked and consistent.
+Applied: `face_2151_410_7_207436` (x=225, ones), `_8_207436` (x=206, tens), `_9_207436` (x=187,
+hundreds, hidden below 100) now indexed by `(t/1)%10` / `(t/10)%10` / `(t/100)%10` off a clamped
+`t = temp < 0 ? 0 : temp` - no genuine minus-sign glyph found for this face (see below), so negative
+temps clamp to 0, same accepted-limitation precedent as the working `1167` face.
+
+Also decoded items `10_212058` and `11_213871` (both sit at the same x=242,y=8 position, previously
+both drawn with neither hidden - identical bug shape to red_magic's °C/°F overlap) - confirmed
+`10_212058` = "°C", `11_213871` = "°F" by direct visual decode (no metadata anywhere for this).
+Now explicitly shows °C, hides °F.
+
+Built + flashed, boot-log clean, BLE fine. **User confirmed digits now show real data** but reported
+a **speckled minus-sign artifact** - same shape of bug as red_magic's "speckle left of the tens
+digit" (see the 07-16 entries above): items `5_65535`/`6_65535`/`12_65535` all sit directly under/
+between the digit positions (x=225/206/193, same y=25 row) sharing one placeholder image asset
+(offset `65535` = no real image data per `items.txt`). Decoded that placeholder anyway out of
+caution - it's a small, incoherent 13x5 speckle, not a clean dash shape, reinforcing these aren't a
+real functional minus-sign mechanism for this face (unlike red_magic's genuine dash-per-digit
+design). Applied the same belt-and-suspenders fix as red_magic's speckle bug: moved all three
+objects physically off-canvas (`x = -100`) in addition to `LV_OBJ_FLAG_HIDDEN`, at their creation
+site (not per-update, since they're never meant to be shown). Built, flashed, boot-log clean.
+**User confirmed: speckle gone.**
+
+All three changes (face swap, temp-digit wiring, speckle fix) flashed and confirmed on-device this
+session. Not yet committed to git along with the rest of this session's uncommitted citizen_410/
+red_magic_410/classic_410 work.
