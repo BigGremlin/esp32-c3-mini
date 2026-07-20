@@ -143,6 +143,9 @@ bool updateSeconds = false;
 bool hasUpdatedSec = false;
 bool navSwitch = false;
 bool extremePowerSave = false;
+bool touchAsleep = false; // step 4: tracks whether tft.touch.sleep() was called, so
+                          // screen_on() only pays TouchDrvFT6X36::wakeup()'s ~200ms
+                          // reset cost when actually waking from a real touch sleep
 
 static long oldPosition = 0;
 
@@ -273,6 +276,17 @@ void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data)
   //   touched = tft.getTouch(&touchX, &touchY);
   // }
 
+#if ESPS3_2_06
+  // Step 4: don't poll a sleeping touch chip over I2C every tick - it can't
+  // wake itself while extremePowerSave has it in deep sleep, only the GPIO0
+  // button can (see screen_on()).
+  if (touchAsleep)
+  {
+    data->state = LV_INDEV_STATE_RELEASED;
+    return;
+  }
+#endif
+
   touched = tft.getTouch(&touchX, &touchY);
 
   if (!touched)
@@ -294,6 +308,18 @@ void screen_on(long extra)
 {
   screenTimer.time = millis() + extra;
   screenTimer.active = true;
+
+#if ESPS3_2_06
+  // Only pay the ~200ms TouchDrvFT6X36::wakeup()/reset() cost when touch was
+  // actually put to sleep (step 4). A real touch press can't reach this
+  // function while asleep in the first place (nothing to read), so this only
+  // fires for the button/alarm wake paths, never on the ordinary touch path.
+  if (touchAsleep)
+  {
+    tft.touch.wakeup();
+    touchAsleep = false;
+  }
+#endif
 }
 
 /* Extreme Power Save step 3: while on power (VBUS present) with the switch on,
@@ -2438,6 +2464,16 @@ void hal_loop()
 
         screenBrightness(0);
         lv_screen_load(ui_home);
+
+#if ESPS3_2_06
+        // Step 4: sleep the touch chip too, gated the same way as the rest of Extreme
+        // Power Save - only while the switch is on and genuinely on battery.
+        if (extremePowerSave && !PMU.isVbusIn())
+        {
+          tft.touch.sleep();
+          touchAsleep = true;
+        }
+#endif
       }
     }
   }
