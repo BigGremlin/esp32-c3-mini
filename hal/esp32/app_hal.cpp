@@ -296,6 +296,23 @@ void screen_on(long extra)
   screenTimer.active = true;
 }
 
+/* Extreme Power Save step 3: while on power (VBUS present) with the switch on,
+   suppress the normal auto-timeout so the screen stays on indefinitely - the
+   GPIO0 button can still force it off (btn_home_handler's existing force-off
+   branch is untouched, it just keeps working since we don't touch
+   screenTimer.active/duration here, only skip the expiry check). Genuinely
+   irrelevant on boards without the AXP2101 (no VBUS sensing there), so this
+   always reads false off ESPS3_2_06 and every other board's behavior is
+   byte-for-byte unchanged. */
+bool staying_on_for_charging()
+{
+#if ESPS3_2_06
+  return extremePowerSave && PMU.isVbusIn();
+#else
+  return false;
+#endif
+}
+
 bool check_alert_state(AlertType type)
 {
   return (alert_states & type) == type;
@@ -1760,7 +1777,18 @@ void btn_home_handler(Button2 &btn)
     }
     if (screenTimer.active && screenTimer.duration > 1 && actScr == ui_home)
     {
-      screenTimer.time = millis() - screenTimer.duration - 1; // trigger timeout immediately
+      if (staying_on_for_charging())
+      {
+        // The normal expiry check is suppressed while staying_on_for_charging()
+        // is true, so the rewind-then-expire trick below would never actually
+        // fire - force it off directly instead.
+        screenTimer.active = false;
+        screenBrightness(0);
+      }
+      else
+      {
+        screenTimer.time = millis() - screenTimer.duration - 1; // trigger timeout immediately
+      }
     }
     else if (!screenTimer.active)
     {
@@ -2403,7 +2431,7 @@ void hal_loop()
       {
         screenTimer.active = false;
       }
-      else if (screenTimer.time + screenTimer.duration < millis())
+      else if (!staying_on_for_charging() && screenTimer.time + screenTimer.duration < millis())
       {
         Timber.w("Screen timeout");
         screenTimer.active = false;
