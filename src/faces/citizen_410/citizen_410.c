@@ -36,7 +36,13 @@ static lv_obj_t *batt_label   = NULL;
 #define CH 410
 #define SCREEN_H 494
 #define Y_OFFSET ((SCREEN_H - CH) / 2)
-#define SCREEN_CX (CW / 2)
+// Whole dial+hands+text assembly nudged 3px left on-screen 2026-07-20 (user
+// noticed it read slightly right-of-center) - dial_img's own raster is
+// untouched, only its draw position and everything anchored to it moves.
+// face_citizen_410_body_bg is a separate case, already re-cropped/shifted to
+// match wherever the dial ends up (see that asset's own header comment).
+#define DIAL_SHIFT_X -3
+#define SCREEN_CX (CW / 2 + DIAL_SHIFT_X)
 #define SCREEN_CY (Y_OFFSET + CH / 2)
 #define PI_F 3.14159265f
 
@@ -45,7 +51,7 @@ static lv_obj_t *batt_label   = NULL;
 // x250-303,y205-271 this time (taller than before). Box grown to 53x54 (from
 // 53x44) to fit the larger day/date font plus a divider line, still comfortably
 // inside the true panel.
-#define DATE_BOX_X 250
+#define DATE_BOX_X (250 + DIAL_SHIFT_X)
 #define DATE_BOX_Y (203 + Y_OFFSET)
 #define DATE_BOX_W 53
 #define DATE_BOX_H 62
@@ -69,7 +75,7 @@ static lv_obj_t *batt_label   = NULL;
 // wired up this pass to show battery %. True panel is x95-158,y200-231; box
 // inset from the left edge specifically to avoid the small red gauge-pointer
 // element that sits just outside it at x~85-93.
-#define BATT_BOX_X 100
+#define BATT_BOX_X (100 + DIAL_SHIFT_X)
 #define BATT_BOX_Y (203 + Y_OFFSET)
 #define BATT_BOX_W 54
 #define BATT_BOX_H 27
@@ -128,7 +134,7 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
 
     dial_img = lv_image_create(face_citizen_410);
     lv_image_set_src(dial_img, &face_citizen_410_dial_img);
-    lv_obj_set_pos(dial_img, 0, Y_OFFSET);
+    lv_obj_set_pos(dial_img, DIAL_SHIFT_X, Y_OFFSET);
     lv_obj_remove_flag(dial_img, LV_OBJ_FLAG_SCROLLABLE);
 
     /* ---- Date window: real LCD-panel background (photo, blurred to erase the
