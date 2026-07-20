@@ -1703,6 +1703,30 @@ All new code `#if ESPS3_2_06`-gated, zero effect on other boards. Built, flashed
 **User confirmed on-device**: touch genuinely stops responding once asleep (by design - only the
 button can wake it in that state), button wakes the screen and touch resumes normally afterward.
 
-**Next up (step 5, not started)**: BLE stop/begin (`watch.stop(true)`/`watch.begin()` on the
-`ChronosESP32` object) tied to the same screen-off-while-on-battery condition. Need to verify
-on-device whether the phone app reconnects cleanly after a stop/begin cycle or needs a fresh pair.
+**Step 5 DONE, tested, committed (`0811039`).** New `bleAsleep` flag, exact same pattern as
+`touchAsleep`. `watch.stop(true)` called alongside `tft.touch.sleep()` in the same gated block;
+`watch.begin()` called from `screen_on()` only when `bleAsleep` is true. Checked
+`NimBLEDevice::deinit()` source before trusting `clearAll=true` wouldn't cause re-pairing pain:
+it only frees the C++ wrapper objects (server/advertising/scan), never touches the bond/pairing
+store, so the phone's existing pairing survives regardless of `clearAll`. `begin()` recreates
+those wrapper objects from scratch each time, so `clearAll=true` (matching the API's own default)
+is the correct choice, not `false`.
+**Testing had one real mid-session mixup worth recording**: user's first report ("button
+disconnected... power on and it took several seconds") was initially read as "tested while
+plugged into USB," which would have meant a real bug (that code path never touches BLE). Turned
+out to mean "powered the screen back on" - all testing was actually on battery throughout. Once
+cleared up: pressing the button on battery correctly disconnects BLE too, because it funnels
+through the *existing* rewind-timer force-off trick into the exact same code path as a natural
+timeout - confirmed expected, not a bug. The "several seconds vs near-instant" reconnect
+difference between the two on-battery tests is almost certainly normal BLE/phone-side scan
+variance (both paths call the identical `watch.begin()`), not a code difference.
+**User confirmed on-device across three scenarios**: natural timeout on battery (instant
+disconnect, near-instant reconnect), button-forced sleep on battery (also disconnects, confirmed
+expected), and button-forced screen-off while genuinely on USB power (BLE stays connected
+throughout - confirmed that path correctly never touches it).
+
+**Next up (step 6, not started, last one)**: CPU light sleep - the one piece with no working
+precedent to lean on (joaquim's own attempt was reverted after a display-banding regression).
+Needs its own isolated experiment before combining with anything above - see the queue_size=1
+finding earlier in this file for why chronos-watch's odds are better than joaquim's, but that's
+not proof, only a reason to actually try it.
