@@ -1856,3 +1856,71 @@ GPIO/wakeup-API tuning can work around. Any future attempt needs to start from *
 (why does RTC-GPIO wake apparently need USB-attached clock keepalive to function on this exact
 board), not from trying yet another wakeup API - and probably needs a custom Arduino-ESP32 core
 build to even investigate properly, not application-level code.
+
+**...update the same evening: step 6 UN-closed. This section is now stale - see cont. 7 below,
+which supersedes the "closes step 6 for real" conclusion above with a working approach.** Left the
+paragraph above intact rather than deleting it - the reasoning in it (ext0/ext1 both blocked by a
+USB-clock dependency) is still correct and worth keeping, it just turned out not to be the whole
+story: a GPIO wake source isn't the only way to wake from light sleep.
+
+
+2026-07-20/21 (cont. 7) — Step 6 retry #3 (timer-poll, no GPIO wake source) - WORKING, user soak-testing
+------------------------------------------------------------------------------------------------
+User's own idea, prompted by re-examining the cont. 5/6 logs: `esp_light_sleep_start()`'s **timer**
+wake had been 100% reliable in *every* test across both prior attempts (`rc=0`, clean, every single
+cycle, no exceptions - only the RTC-GPIO wake trigger itself was ever unreliable). So instead of
+depending on ext0/ext1 at all, this version doesn't configure a GPIO wake source - it just polls
+GPIO0 with a plain `digitalRead()` every time the periodic timer wakes it (200ms interval), and
+treats a LOW reading as "wake now". GPIO0 never switches to RTC-IO function this way - it stays in
+Button2's own digital mode the whole time - which sidesteps the entire class of problem cont. 5/6
+hit, rather than working around it. Tradeoff: button response is bounded by the poll interval
+(≤200ms) instead of instant, judged an acceptable cost given two failed attempts at instant wake.
+
+**Confirmed working on real battery on the first genuine test** - the first time any wake mechanism
+in this whole step-6 saga has worked off USB power. Then three more real bugs surfaced through
+actual use, each found and fixed same-session:
+
+1. **Wake press got misclassified as a long-click, jumping into the face picker instead of just
+   waking.** Root cause: the original design deliberately let Button2 see and classify the
+   wake-triggering press itself (see cont. 5's original comment, now stale). Button2 hadn't polled
+   in seconds (asleep the whole time) - handing it a still-down button as its first fresh reading
+   let it measure the hold from an arbitrary starting point. **Fix**: consume the wake press
+   entirely inside `deep_idle_loop()` - call `screen_on()` directly the moment a LOW read is seen,
+   then busy-wait for the physical release before returning control to the normal loop, so
+   Button2's first post-wake poll always sees a clean "not pressed" state and only a genuinely new
+   press after this one ever gets classified as a click.
+
+2. **A held-a-bit-longer wake press (past a first-pass 2s release-wait cap) still flashed the
+   screen on then immediately off.** The release-wait loop's timeout was too short - a plain
+   "hold the button a little longer than a quick tap" (very normal human behaviour, especially
+   given the up-to-200ms response lag makes people unsure whether their press registered) exceeded
+   2s, handed the still-down button to Button2 after all, which read it as a fresh press on an
+   already-awake home screen and fired the existing press-to-turn-off toggle - instantly undoing
+   the `screen_on()` from fix #1. **Fix**: extended the release-wait cap to 15s (only meant as a
+   safety net against a genuinely stuck/shorted pin, not a real expected wait - any realistic human
+   hold is comfortably under that).
+
+3. **With fix #2 in place, the screen wouldn't visibly light up at all until the button was
+   released** ("won't start up until I take my finger off the button" - but a snappy tap still
+   worked instantly). Root cause: `screen_on()` only sets `screenTimer`'s flag/timestamp - the code
+   that actually restores the physical backlight (`screenBrightness()`) lives further down in the
+   *same* `hal_loop()` call, which is never reached until `deep_idle_loop()` returns - and fix #2's
+   release-wait loop blocks synchronously right there, so nothing calls `screenBrightness()` until
+   release. **Fix**: call `screenBrightness(lv_slider_get_value(ui_brightnessSlider))` directly,
+   immediately after `screen_on()`, so the physical backlight comes on right away regardless of how
+   long the subsequent release-wait blocks for. Needed a forward declaration
+   (`void screenBrightness(uint8_t value);` near the other forward decls) since the real definition
+   sits much later in the file than `deep_idle_loop()`.
+
+**User confirmed all three fixes working together on-device**: quick tap wakes instantly, a longer
+held press now lights the screen immediately too and stays on properly after release, in both
+cases resuming to the watch face rather than the face picker.
+
+**Status: NOT YET COMMITTED, deliberately.** User wants to soak-test on real battery for about a
+day before finalizing - this note exists so a fresh session picks up the right state rather than
+re-deriving it. Current uncommitted diff is entirely in `hal/esp32/app_hal.cpp` (~85 lines): the
+`on_battery()` helper, `staying_on_for_charging()` switched to use it, `deep_idle_loop()`
+(timer-poll + consume-press + extended release-wait + immediate backlight restore), the
+`hal_loop()`/touch-sleep-block call sites switched to `on_battery()`, and the `screenBrightness`
+forward declaration. If resuming without the user around: **do not commit or revert this
+automatically** - ask first, the soak-test outcome isn't known yet.
