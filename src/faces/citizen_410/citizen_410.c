@@ -49,7 +49,13 @@ static lv_obj_t *batt_label   = NULL;
 #define DATE_BOX_Y (203 + Y_OFFSET)
 #define DATE_BOX_W 53
 #define DATE_BOX_H 62
-#define DATE_FONT &lv_font_montserrat_22
+// DSEG14 (real LCD-style 14-segment font) - fixed 2026-07-20: lv_font_conv
+// defaults to RLE-compressed output (bitmap_format=1), but LV_USE_FONT_COMPRESSED
+// is 0 in include/lv_conf.h, so lv_font_get_bitmap_fmt_txt() silently returned
+// NULL for every glyph -> the null-deref crash-loop from the earlier session.
+// Regenerated with --no-compress (bitmap_format=0, PLAIN) instead of touching
+// the global lv_conf.h flag - isolated test label confirmed clean boot.
+#define DATE_FONT &dseg14_bold_18
 // Day-name label is drawn wider than the true 53px physical panel (see
 // OVERFLOW_VISIBLE note at date_box's creation) since the widest day names
 // ("MON" 57.4px, "WED" 57.7px per lv_font_montserrat_22's own adv_w table)
@@ -67,12 +73,10 @@ static lv_obj_t *batt_label   = NULL;
 #define BATT_BOX_Y (203 + Y_OFFSET)
 #define BATT_BOX_W 54
 #define BATT_BOX_H 27
-#define BATT_FONT &lv_font_montserrat_20
-// Half a DSEG14-18 digit's advance width, per user request to shift the
-// battery number right past where plain centering alone would put it
-// (once the trailing "%" is dropped, centering the shorter string already
-// shifts it right by half a character - this adds one more half on top).
-#define BATT_EXTRA_SHIFT_X 6
+#define BATT_FONT &dseg14_bold_18
+// Right-justified battery number: small inset from the box's own right edge
+// so the text doesn't touch the rounded corner (batt_box radius 4).
+#define BATT_RIGHT_PAD 3
 
 // Real hand sprites (see face_citizen_410_hand_*.c) are cut straight from the
 // source photo at whatever angle they happened to be posed at, not pointing
@@ -197,7 +201,7 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_set_style_bg_opa(date_shadow, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(date_shadow, 0, 0);
     lv_label_set_text(date_shadow, "01");
-    lv_obj_set_pos(date_shadow, 2, 34);
+    lv_obj_set_pos(date_shadow, 2, 39);
     lv_obj_set_width(date_shadow, DATE_BOX_W);
 
     date_label = lv_label_create(date_box);
@@ -207,7 +211,9 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_set_style_bg_opa(date_label, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(date_label, 0, 0);
     lv_label_set_text(date_label, "01");
-    lv_obj_set_pos(date_label, 0, 32);
+    /* Nudged down ~1/4 character (DSEG14-18 line_height=18, so ~5px) per
+       user request 2026-07-20. */
+    lv_obj_set_pos(date_label, 0, 37);
     lv_obj_set_width(date_label, DATE_BOX_W);
 
     /* ---- Battery window: left-hand LCD panel, same style as the date
@@ -228,21 +234,23 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     batt_shadow = lv_label_create(batt_box);
     lv_obj_set_style_text_font(batt_shadow, BATT_FONT, 0);
     lv_obj_set_style_text_color(batt_shadow, lv_color_hex(0x5a5a5a), 0);
-    lv_obj_set_style_text_align(batt_shadow, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(batt_shadow, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_pad_right(batt_shadow, BATT_RIGHT_PAD, 0);
     lv_obj_set_style_bg_opa(batt_shadow, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(batt_shadow, 0, 0);
     lv_label_set_text(batt_shadow, "100");
-    lv_obj_set_pos(batt_shadow, 2 + BATT_EXTRA_SHIFT_X, 3);
+    lv_obj_set_pos(batt_shadow, 2, 3);
     lv_obj_set_width(batt_shadow, BATT_BOX_W);
 
     batt_label = lv_label_create(batt_box);
     lv_obj_set_style_text_font(batt_label, BATT_FONT, 0);
     lv_obj_set_style_text_color(batt_label, lv_color_black(), 0);
-    lv_obj_set_style_text_align(batt_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(batt_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_pad_right(batt_label, BATT_RIGHT_PAD, 0);
     lv_obj_set_style_bg_opa(batt_label, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(batt_label, 0, 0);
     lv_label_set_text(batt_label, "100");
-    lv_obj_set_pos(batt_label, BATT_EXTRA_SHIFT_X, 1);
+    lv_obj_set_pos(batt_label, 0, 1);
     lv_obj_set_width(batt_label, BATT_BOX_W);
 
     /* ---- Clock hands: real sprites cut from the source photo, not drawn
