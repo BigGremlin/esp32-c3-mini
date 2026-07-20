@@ -1725,8 +1725,79 @@ disconnect, near-instant reconnect), button-forced sleep on battery (also discon
 expected), and button-forced screen-off while genuinely on USB power (BLE stays connected
 throughout - confirmed that path correctly never touches it).
 
-**Next up (step 6, not started, last one)**: CPU light sleep - the one piece with no working
-precedent to lean on (joaquim's own attempt was reverted after a display-banding regression).
-Needs its own isolated experiment before combining with anything above - see the queue_size=1
-finding earlier in this file for why chronos-watch's odds are better than joaquim's, but that's
-not proof, only a reason to actually try it.
+2026-07-20 (cont. 5) — Step 6 (CPU light sleep) ATTEMPTED, ABANDONED - real USB-disruption bug found
+------------------------------------------------------------------------------------------------
+Investigated and implemented, then fully reverted (never committed - `git checkout` cleanly
+restored `hal/esp32/app_hal.cpp` to the step-5 state, `0b92022`). Recording the full investigation
+here so nobody re-attempts this blind later - the finding is real and toolchain-specific, not a
+one-off fluke.
+
+**First: confirmed the "automatic" path is a dead end, then found a viable-looking alternative.**
+Checked the actual precompiled sdkconfig for this exact board/toolchain
+(`~/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/qio_opi/include/sdkconfig.h`,
+`qio_opi` being `lolin_s3_pro`'s `memory_type` per its board JSON) - neither
+`CONFIG_FREERTOS_USE_TICKLESS_IDLE` nor `CONFIG_PM_ENABLE` are defined anywhere in it. So the
+automatic/tickless-idle approach joaquim tried isn't just risky here, it's not even compiled in.
+But a manual/explicit alternative looked viable: `esp_light_sleep_start()` +
+`esp_sleep_enable_ext0_wakeup()` don't depend on tickless idle at all. **Verified this empirically,
+not by assumption** - added a temporary probe function (never called, guarded by a
+compiler-unprovable `volatile bool` so the linker couldn't dead-strip it), built, confirmed it
+linked cleanly (~8.4KB of real object code pulled in), then removed the probe with zero trace
+before writing the real implementation.
+
+**Implementation**: new `deep_idle_loop()`, entered from the top of `hal_loop()` only once
+`touchAsleep && bleAsleep` are both already true (steps 4/5's own gate) - deliberately *not* relying
+on automatic idle-triggered sleep, entering a dedicated loop only once nothing is being
+rendered/transmitted, specifically to avoid joaquim's mid-flush-interruption failure mode. Loop:
+`esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0)` (button) + a 2s periodic timer re-check, calling
+`esp_light_sleep_start()` repeatedly; breaks out on an `ESP_SLEEP_WAKEUP_EXT0` cause and lets the
+normal `hal_loop()`/`btn_home.loop()` flow take over from there (deliberately does *not* call
+`screen_on()` itself, so Button2's own click-type classification stays undisturbed).
+
+**Bug 1, found and fixed**: button couldn't wake it at all. Read `sleep_modes.c` directly (this
+machine has a local `~/esp-idf` checkout) - `esp_sleep_enable_ext0_wakeup()` switches the pin to
+RTC-IO function during sleep prep but never touches its pull resistors; Button2's digital-domain
+`INPUT_PULLUP` doesn't apply once the pin is in RTC function, so it floats during actual sleep.
+Fixed with `rtc_gpio_pullup_en()`/`rtc_gpio_pulldown_dis()` before `esp_sleep_enable_ext0_wakeup()`,
+plus `rtc_gpio_deinit()` after the loop exits to restore plain digital mode for Button2's
+subsequent polling. **Built, flashed, tested - still didn't wake from battery.**
+
+**Bug 2, found via a live-serial diagnostic build, NOT fixed - real toolchain limitation.** Couldn't
+watch the actual on-battery failure live (being connected to this machine's USB *is* VBUS power,
+which prevents the sleep path from ever engaging at all - a real methodological catch-22). Worked
+around it with a temporary `on_battery()` override (hardcoded `return true`, replacing all four
+`PMU.isVbusIn()` call sites for this feature) so the exact same code path could run while still
+connected for live serial visibility, plus added verbose per-iteration logging
+(`esp_light_sleep_start()`'s return code, wakeup cause, live `digitalRead(0)`). This revealed the
+real picture:
+- `esp_light_sleep_start()` itself works fine - returns cleanly every ~2s, `rc=0`, no hang. This
+  ruled out the "PM component not initialized, sleep call hangs" theory outright.
+- Every single wake reported `cause=4` (`ESP_SLEEP_WAKEUP_TIMER`) - never `cause=2` (`EXT0`), i.e.
+  button wakeup genuinely never registers no matter what.
+- **While watching, the device vanished from the USB bus entirely** (`lsusb` showed nothing
+  matching Espressif's vendor ID, not just a renamed serial port) - even though it was plugged in
+  continuously the whole time. It did not come back on its own; needed a physical unplug/replug to
+  recover, every single time, across several repeated occurrences while trying to reflash the
+  revert afterward.
+
+**Conclusion: `esp_light_sleep_start()` disrupts USB connectivity on this exact board/toolchain
+combination badly enough to need a physical replug to recover, and separately never delivers a
+genuine EXT0 wakeup.** This is very plausibly *why* Espressif shipped this Arduino core variant
+with `CONFIG_PM_ENABLE`/tickless-idle disabled in the first place - not an oversight, a deliberate
+choice given unresolved peripheral interactions like this. Matches what the user saw independently
+on real battery testing (stuck asleep, only a fresh USB connection - not the button - brought it
+back), which in hindsight was the same USB-disruption symptom, not a hang inside the sleep call.
+
+**Fully reverted, nothing committed.** `git checkout -- hal/esp32/app_hal.cpp` cleanly restored the
+step-5 state (`0b92022`) - the diagnostic/probe code left zero trace. Had to fight through several
+rounds of the device dropping off USB mid-reflash (same underlying disruption, lingering from the
+firmware that was still running during the revert-and-reflash attempts) before successfully getting
+the known-good step-5 build back onto the device and confirming a clean boot + normal heap
+(~19KB free, matching pre-step-6 readings, vs ~14KB while the sleep code was resident).
+
+**Extreme Power Save feature considered DONE as of here, steps 1-5 only.** Screen dimming, touch
+sleep, and BLE stop already cover the bulk of the real power draw; CPU stays awake, which is a
+real but comparatively small remaining gap. Step 6 is not being re-attempted without a materially
+different approach (e.g. a from-source Arduino-ESP32 core build with PM properly enabled and
+tested - a much larger undertaking, not a simple project-level change) - don't re-attempt the
+`esp_light_sleep_start()` approach on this toolchain again without reading this entry first.
