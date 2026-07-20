@@ -1498,6 +1498,106 @@ patch row 0 84.6 -> 142.7, both now close to their plateau instead of near-black
 Built clean (flash 84.0%, comfortably under budget, `.pio` output unchanged in shape from before),
 flashed via `pio run -t upload`, boot log watched via a DTR/RTS reset pulse - clean, `AXP2101
 battery: 100%, charging: 0`, `Setup done`, no crash-loop. Committed (`85953c1`) and pushed.
-**Not yet visually confirmed on-device by the user** - that's the next step when picking this back
-up. Still-open items from earlier sessions (hand pivot/length further review, DSEG14 font isolated
-retest) untouched this session.
+**User confirmed the fix on-device.** Also asked for the day/date divider bumped 1px -> 2px
+(`day_date_divider` height in `citizen_410.c`) - flashed, confirmed good, committed (`9fd9a5d`).
+
+
+2026-07-20 (cont.) — citizen_410: DSEG14 crash root-caused and fixed, real LCD font now live
+------------------------------------------------------------------------------------------------
+Root cause of the crash-loop parked since 07-18 finally found via source-level analysis, not
+guesswork: `lv_font_conv` defaults to RLE-compressed glyph output (`bitmap_format=1` in the
+generated font_dsc), but `include/lv_conf.h:429` has `LV_USE_FONT_COMPRESSED 0`. Checked
+`.pio/libdeps/lolin_s3_2_06/lvgl/src/font/lv_font_fmt_txt.c` directly: when compressed but not
+supported, `lv_font_get_bitmap_fmt_txt()` logs a warning and returns `NULL` - exactly the null
+`draw_buf->data` deref crash decoded back on 07-18 (`lv_draw_sw_letter.c:176`). Fixed by
+regenerating `dseg14_bold_18.c` with `lv_font_conv --no-compress` (same TTF, same glyph ranges,
+`fonts-DSEG_v046/DSEG14-Classic/DSEG14Classic-Bold.ttf` still present in an old scratchpad) -
+`bitmap_format=0` (PLAIN) afterward, sidesteps the disabled code path entirely rather than
+touching the global `lv_conf.h` flag (safer - avoids affecting every other font in the project).
+
+**Isolated test first, per the standing plan**: added a throwaway `dseg14_test` label on top of
+the face showing "01:23", built, flashed, watched the boot log - clean, no crash. Confirmed the
+font itself now works before touching anything live.
+
+**Wired into the real day/date/battery labels**, removed the test label. `DATE_FONT`/`BATT_FONT`
+switched from `lv_font_montserrat_22`/`_20` to `&dseg14_bold_18`. Built+flashed clean (boot log
+watched via DTR/RTS reset), no crash. **User confirmed it looks good on-device.**
+
+Two follow-up tweaks, both user-requested after seeing it: **battery right-justified** - replaced
+the old `LV_TEXT_ALIGN_CENTER` + manual `BATT_EXTRA_SHIFT_X` hack (a leftover from when the
+trailing "%" was dropped) with real `LV_TEXT_ALIGN_RIGHT` + a small `BATT_RIGHT_PAD` (3px) inset
+from the box's rounded corner. **Date (day-of-month) digits nudged down** ~1/4 character
+(DSEG14-18's `line_height`=18, so 5px) - `date_label`/`date_shadow` y positions 32/34 -> 37/39,
+kept the shadow's existing +2/+2 offset convention intact. Built, flashed, boot-clean, user
+confirmed both. Committed together (`fe98670`) since the font fix and the two tweaks were one
+continuous flash-and-check loop.
+
+
+2026-07-20 (cont. 2) — citizen_410: dial nudged 3px left on-screen, body/case re-fitted to match
+------------------------------------------------------------------------------------------------
+User flagged the dial reading slightly right-of-center (noticed looking at the case area outside
+the round dial) and asked for a 3px correction. Important scope clarification mid-discussion after
+an initial back-and-forth: **the dial's own picture must not be regenerated/re-cropped** - only
+its on-screen draw position, plus hands and LCD text, should move. The **body/case picture** is
+the one that gets regenerated/re-fitted to match wherever the dial ends up.
+
+Implementation: new `DIAL_SHIFT_X` (-3) constant in `citizen_410.c`, applied to `dial_img`'s
+`lv_obj_set_pos` (raster itself untouched), `SCREEN_CX` (shifts all hand pivots + the center cap
+in one place), `DATE_BOX_X`, `BATT_BOX_X`. `body_bg` stays drawn at (0,0) - its shift is baked
+into the regenerated picture instead, so the two mechanisms combine into one uniform 3px-left
+shift of the whole assembly on the physical screen while dial-vs-body relative alignment is
+preserved (verified this reasoning with a written-out coordinate trace before touching code, not
+just intuition).
+
+**Re-deriving the body/case crop without trusting old notes.** The original 07-18 session's exact
+webp crop rectangle (center/scale in `CitizenE-DriveRedArrowsRAFA_900x.webp`) was never recorded
+numerically, only "scale 0.804, rotation 0.0". Rather than re-run the fragile from-scratch
+Canny-edge dial-vs-photo matchTemplate search (tried first, got weak/boundary-hugging 0.06-0.25
+confidence results - masking the dial's artificial black corners out of the correlation with a
+proper `matchTemplate` mask helped some (0.83) but still landed on an implausible scale/location
+when checked visually), found a much more reliable path: a leftover verification image from that
+original session, `match_compare.png` (side-by-side dial vs. matched-crop, still in an old
+scratchpad), gave a clean, already-correct 410x410 resized reference crop. Matching *that* back
+against the same webp photo (rather than the dial itself) landed on 0.976 confidence, crop origin
+(196,149), size 510x510 (scale 410/510=0.8039, rotation ~0) - matches the documented "0.804, 0deg"
+almost exactly, confirming the recovered rectangle is trustworthy. Verified further with a 50/50
+blend overlay against the existing `body_bg` asset before trusting it (bezel numbers, bracelet
+links, all sharp, no doubling).
+
+Extended that rectangle vertically for the full 410x494 screen (same recipe as the original: X
+unchanged, Y extended by `Y_OFFSET` each side, converted through the 0.8039 scale), shifted the
+X-origin by `3/0.8039 =~3.73` webp px (right, since moving the crop window right shifts the
+*output* content left), re-resampled fresh from the real photo - the newly-exposed edge strip is
+genuine photo content, not synthesized.
+
+**Flood-fill bug found and fixed before flashing.** First attempt at re-flood-filling the photo's
+white studio background to black (same technique as 07-18) seeded from *every* border pixel
+without checking color first. The bracelet touches the top/bottom crop edges with its own dark
+metal tones - those became bad seed origins, and flood-filling outward from a dark grey seed (even
+with `FLOODFILL_FIXED_RANGE`) ate the connected crown/pusher/bracelet detail, nearly erasing both
+pushers and most of the crown. Caught by a side-by-side zoom comparison against the existing asset
+before flashing - user's own description ("harsh", "taking detail from left and right") matched
+exactly what the comparison showed. Fixed by only seeding from border pixels that are genuinely
+near-white (`min channel > 220`) - 374 of ~410 candidate seed points were real watch content and
+correctly skipped, only 12 true-white seeds used. Crown/pusher detail confirmed back, arguably
+slightly more visible than the original asset (this crop extends ~3.7px further right).
+
+Built, flashed, boot-log clean both times (first with the flood-fill bug, then the fix - user
+caught the bug from a sent image before it was even flashed the second time... actually was
+flashed once with the bug for the shift-only check, then again with the fix). **User confirmed
+good result on-device.** Committed (`de47ec7`) and pushed.
+
+
+2026-07-20 (cont. 3) — GitHub release published for fbiego
+------------------------------------------------------------------------------------------------
+User wants to show this work to the upstream author (fbiego). Tagged current `gremlinDev` HEAD
+(`de47ec7`) as `citizen-410-preview-2026-07-20`, pushed the tag, and created a GitHub release on
+the fork (`BigGremlin/esp32-c3-mini`) via `gh release create` - title "Citizen Eco-Drive watchface
+(WIP preview)", release notes summarizing citizen_410/red_magic/red_magic_410/classic_410, with
+the freshly-rebuilt `lolin_s3_2_06_v6.3_0x0.bin` attached as a flashable asset. Release:
+https://github.com/BigGremlin/esp32-c3-mini/releases/tag/citizen-410-preview-2026-07-20
+
+Still-open items, unchanged: hand pivot/length further review ("will check more later", never
+followed up), and the "lines above/below LCD characters" concern from 07-18 - worth checking
+whether that's actually resolved now given the LCD background rewrite two sessions ago, or still
+needs a dedicated look.
