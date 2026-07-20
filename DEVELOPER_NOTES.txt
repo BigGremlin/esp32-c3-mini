@@ -1686,5 +1686,23 @@ Built, flashed, boot-clean. **User confirmed all three behaviors on-device**: sc
 past a short timeout while plugged in with the switch on; the button turns it off on demand in
 that state; unplugging restores the exact original timeout behavior.
 
-**Next up (step 4, not started)**: touch sleep/wake (`touch.sleep()`/`touch.wakeup()` on
-`TouchDrvFT6X36`) tied to screen-off-while-on-battery, gated by the switch.
+**Step 4 DONE, tested, committed (`e94f25f`).** New `touchAsleep` flag. `tft.touch.sleep()` called
+right alongside the existing screen-off action in the main-loop timeout branch, gated by
+`extremePowerSave && !PMU.isVbusIn()` (same condition family as step 3). Two things caught by
+reading the touch driver source before writing any of this, not by trial and error on-device:
+1. `TouchDrvFT6X36::wakeup()` calls `reset()`, which is a real ~200ms blocking GPIO reset sequence
+   (10ms + 30ms + 160ms delays) - NOT cheap. `screen_on()` is called from `my_touchpad_read()` on
+   every ordinary touch press, so unconditionally waking touch there would add a 200ms stall to
+   every single tap. Fixed by only calling `wakeup()` when `touchAsleep` is actually true - it can
+   only be true via the button/alarm wake paths, since a sleeping touch chip can't generate a press
+   to reach the touch-driven call site in the first place.
+2. `my_touchpad_read()` was still polling `tft.getTouch()` (I2C) every ~5ms tick even while the
+   chip is asleep, for nothing - a sleeping FT6X36 can't wake itself, only the button can. Added an
+   early return (report not-touched, skip the I2C read entirely) while `touchAsleep` is true.
+All new code `#if ESPS3_2_06`-gated, zero effect on other boards. Built, flashed, boot-clean.
+**User confirmed on-device**: touch genuinely stops responding once asleep (by design - only the
+button can wake it in that state), button wakes the screen and touch resumes normally afterward.
+
+**Next up (step 5, not started)**: BLE stop/begin (`watch.stop(true)`/`watch.begin()` on the
+`ChronosESP32` object) tied to the same screen-off-while-on-battery condition. Need to verify
+on-device whether the phone app reconnects cleanly after a stop/begin cycle or needs a fresh pair.
