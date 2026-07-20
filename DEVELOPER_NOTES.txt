@@ -1801,3 +1801,58 @@ real but comparatively small remaining gap. Step 6 is not being re-attempted wit
 different approach (e.g. a from-source Arduino-ESP32 core build with PM properly enabled and
 tested - a much larger undertaking, not a simple project-level change) - don't re-attempt the
 `esp_light_sleep_start()` approach on this toolchain again without reading this entry first.
+
+
+2026-07-20 (cont. 6) — Step 6 RETRIED with ext1 (user supplied external research), same conclusion
+------------------------------------------------------------------------------------------------
+User dropped a research document into the scratchpad
+(`ESP32-S3_AMOLED_2.06_LightSleep_DeepDive.md`) after the cont. 5 abandonment, citing a real,
+tracked framework bug (`espressif/arduino-esp32#6581` - "ESP32-S3 native USB CDC stops working
+after light sleep") that matches the USB-disruption symptom exactly, and recommending
+`esp_sleep_enable_ext1_wakeup_io()`/`esp_sleep_enable_ext1_wakeup()` over the `ext0` API tried
+before - ext0 and ext1 are genuinely different RTC hardware paths on S-series chips, not aliases,
+and the doc cited a Waveshare-repo issue (#9) about exactly this class of GPIO/RTC-IO wakeup
+mismatch on this board family. Worth a real retry given a concrete, specific reason ext0 might
+have been the wrong choice, not just re-trying the same thing hoping for a different result.
+
+**Re-implemented with ext1**, reading `ext1_wakeup_prepare()` in `sleep_modes.c` directly first
+(not assuming it behaves like ext0's prepare path) - confirmed the same missing-pull-resistor
+gotcha applies, plus ext1 additionally calls `rtcio_hal_hold_enable()` on this chip (latches the
+pin through sleep), which ext0 never did - added `rtc_gpio_hold_dis()` after wake, on top of the
+existing `rtc_gpio_pullup_en()`/`pulldown_dis()`/`rtc_gpio_deinit()` from the ext0 attempt.
+
+**Went straight to a live-diagnostic build this time** (temporary `on_battery()` override forcing
+the on-battery code path while still connected via USB, plus verbose per-iteration logging of
+`esp_light_sleep_start()`'s return code and the wakeup cause) rather than testing blind first,
+given round 1 burned two blind attempts before getting real visibility.
+
+**Result, watched live: the button wake genuinely worked.** `cause=3` (`ESP_SLEEP_WAKEUP_EXT1`),
+`gpio0_level=0` (pressed), "woke via button (ext1), exiting loop" - a real, clean wakeup, and
+critically the USB connection stayed alive through the whole sequence this time (no repeat of the
+cont. 5 USB-vanishing-from-the-bus symptom, at least while connected). Minor cosmetic quirk
+observed while the button was held: rapid re-entry into `deep_idle_loop()` a few times in quick
+succession (level-triggered wake re-fires instantly if the pin is still held low on re-entry) -
+not investigated further, moot given what came next.
+
+**Then the real test - genuinely on battery, USB fully disconnected - failed identically to before:
+button did not wake it, needed a full reboot to recover.** This is the critical finding: the
+successful diagnostic test was almost certainly an artifact of USB being physically attached, not
+a real fix. The research doc itself flagged the mechanism: "ESP-IDF keeps the BBPLL powered while
+a USB host is attached" (to avoid bricking the console on wake) - if that same clock domain is
+what the RTC-GPIO wake circuitry actually depends on to function correctly, connecting USB for
+diagnostics was inadvertently keeping the wake mechanism alive, and disconnecting it (the real
+target condition) removes exactly what made the diagnostic test pass. This is not something fixable
+in application code - it would be a board-support/SDK-level clock configuration question.
+
+**Fully reverted again, nothing committed** (`git checkout -- hal/esp32/app_hal.cpp`, clean, same
+as cont. 5). Confirmed working step-5 state restored (heap ~19KB free, matching pre-step-6
+readings), boot clean.
+
+**This closes step 6 for real, not just "one more idea to try."** Two independent wake-source APIs
+(ext0, ext1) tried, one real bug found and fixed along the way (missing pull resistors), one
+external, credible lead investigated properly (not dismissed) - and the underlying problem turned
+out to be a hardware/clock-domain dependency on USB attachment state, which no amount of
+GPIO/wakeup-API tuning can work around. Any future attempt needs to start from *that* problem
+(why does RTC-GPIO wake apparently need USB-attached clock keepalive to function on this exact
+board), not from trying yet another wakeup API - and probably needs a custom Arduino-ESP32 core
+build to even investigate properly, not application-level code.
