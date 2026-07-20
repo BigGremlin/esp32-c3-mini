@@ -142,6 +142,7 @@ bool readIMU = false;
 bool updateSeconds = false;
 bool hasUpdatedSec = false;
 bool navSwitch = false;
+bool extremePowerSave = false;
 
 static long oldPosition = 0;
 
@@ -1228,6 +1229,16 @@ void onNavState(lv_event_t *e)
   prefs.putBool("autonav", navSwitch);
 }
 
+/* Extreme Power Save: settings toggle only so far, no behavior wired up yet
+   (step 2 of the power-management plan - see DEVELOPER_NOTES.txt). */
+void onExtremePowerSave(lv_event_t *e)
+{
+  lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+  extremePowerSave = lv_obj_has_state(obj, LV_STATE_CHECKED);
+
+  prefs.putBool("extremepwr", extremePowerSave);
+}
+
 void savePrefInt(const char *key, int value)
 {
   prefs.putInt(key, value);
@@ -2040,6 +2051,7 @@ void hal_setup()
   circular = prefs.getBool("circular", false);
   alertSwitch = prefs.getBool("alerts", false);
   navSwitch = prefs.getBool("autonav", false);
+  extremePowerSave = prefs.getBool("extremepwr", false);
 
   lv_obj_scroll_to_y(ui_settingsList, 1, LV_ANIM_ON);
   lv_obj_scroll_to_y(ui_appList, 1, LV_ANIM_ON);
@@ -2082,6 +2094,15 @@ void hal_setup()
     lv_obj_remove_state(ui_navStateSwitch, LV_STATE_CHECKED);
   }
 #endif
+
+  if (extremePowerSave)
+  {
+    lv_obj_add_state(ui_extremePowerSaveSwitch, LV_STATE_CHECKED);
+  }
+  else
+  {
+    lv_obj_remove_state(ui_extremePowerSaveSwitch, LV_STATE_CHECKED);
+  }
 
   screenTimer.active = true;
   screenTimer.time = millis();
