@@ -146,6 +146,9 @@ bool extremePowerSave = false;
 bool touchAsleep = false; // step 4: tracks whether tft.touch.sleep() was called, so
                           // screen_on() only pays TouchDrvFT6X36::wakeup()'s ~200ms
                           // reset cost when actually waking from a real touch sleep
+bool bleAsleep = false;   // step 5: tracks whether watch.stop() was called, so
+                          // screen_on() only re-inits BLE (watch.begin()) when it
+                          // was actually stopped
 
 static long oldPosition = 0;
 
@@ -318,6 +321,13 @@ void screen_on(long extra)
   {
     tft.touch.wakeup();
     touchAsleep = false;
+  }
+
+  // Step 5: restart BLE the same way - only when it was actually stopped.
+  if (bleAsleep)
+  {
+    watch.begin();
+    bleAsleep = false;
   }
 #endif
 }
@@ -2472,6 +2482,14 @@ void hal_loop()
         {
           tft.touch.sleep();
           touchAsleep = true;
+
+          // Step 5: stop BLE entirely too - clearAll=true (the default) is
+          // correct here since begin() below will recreate the server/
+          // advertising objects from scratch; bonding/pairing info lives in
+          // the NimBLE host's own store, untouched by deinit either way, so
+          // the phone's existing pairing should survive this cycle.
+          watch.stop(true);
+          bleAsleep = true;
         }
 #endif
       }
