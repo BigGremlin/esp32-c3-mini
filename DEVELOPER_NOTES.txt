@@ -1924,3 +1924,86 @@ re-deriving it. Current uncommitted diff is entirely in `hal/esp32/app_hal.cpp` 
 `hal_loop()`/touch-sleep-block call sites switched to `on_battery()`, and the `screenBrightness`
 forward declaration. If resuming without the user around: **do not commit or revert this
 automatically** - ask first, the soak-test outcome isn't known yet.
+
+
+2026-07-22 — citizen_410 shadow/LCD polish, flash-method NVS bug found+fixed, step 6 soak
+test confirmed (~10x), both PR'd upstream, timeout dropdown +45/60s
+------------------------------------------------------------------------------------------------
+**citizen_410 visual polish, committed `b46ebcb`.** LCD date/battery panel backgrounds (the
+blurred-photo texture behind the day/date/battery digits) made fully transparent
+(`bg_opa`/`bg_image_opa` both `LV_OPA_TRANSP`) so the dial/body shows through instead - text
+position and the day/date divider nudged to compensate. Date number switched to right-justified
+(was center). Pivot cap (the small circle covering the hands' hub) went through a few rounds: user
+asked to remove it, then to bring it back "sampled from the second hand's colour" - actually wrote
+a small Python script (not checked into the repo, one-off) that decodes the RGB565+alpha pixel data
+straight out of `face_citizen_410_hand_second.c`'s generated array, filters for high-alpha
+low-green/blue (true red) pixels, and averages them - landed on `0xF41220`, close to the sprite's
+purest red cluster. Cap resized 12px -> 8px same pass. Shadow drop-copies got a cheap "blur":
+LVGL's own `shadow_width` box-shadow only blurs a widget's rounded-rect, not glyph shapes, so this
+fakes it the same way multi-layer CSS text-shadow does - 4 extra copies of each shadow label at
+±1px diagonal offsets and low opacity (`create_shadow_halo()` helper, shared by day/date/battery).
+Went through two more rounds of "tone down the blur" (`LV_OPA_40` -> `LV_OPA_20`) and "lighten/then
+exactly-halfway the shadow colour" (`0x5a5a5a` -> `0x787878` -> `0x696969`, the last one computed as
+the literal midpoint of the other two, not eyeballed).
+
+**Flash-method bug found: merged single-file flashing was silently wiping NVS (settings) on every
+reflash - not present before this session.** User noticed Extreme Power Save's settings kept
+resetting and correctly guessed it was new this session. Root cause: earlier in the session,
+flashing used `firmware/lolin_s3_2_06_v6.3_0x0.bin` - the project's own post-build merge script's
+single-file output, the same artifact used for the 2026-07-20 GitHub release - written whole to
+offset 0x0. That image spans the *entire* flash region in one write, so it blanks `nvs` (0x9000,
+confirmed via `partitions_16M.csv`) and `ffat` along with everything else - correct for a factory
+flash, wrong for iterative dev use. All prior sessions used `pio run -t upload` (or equivalent),
+which only touches `bootloader.bin`@0x0, `partitions.bin`@0x8000, `firmware.bin`@0x10000. **Fixed
+by flashing those three files individually at their real offsets instead of the merged image** -
+this is now the standing method for this project, not just a one-off; `nvs`/`ffat` are never
+touched by a normal dev flash again.
+
+**citizen_410 PR'd upstream: https://github.com/fbiego/esp32-c3-mini/pull/48.** Built on a fresh
+branch (`citizen-410-face`) off `upstream/main`, not off `gremlinDev` directly, since `gremlinDev`
+has Extreme Power Save (uncommitted at the time) and other in-progress faces
+(`classic_410`/`75_2_410`/`red_magic_410`) tangled into the same shared files. Discovered along the
+way that the local fork's `main` was 4 commits stale - the AXP2101 battery fix and 1167_410 fix
+(PRs #45/#46, opened 2026-07-13) had already been merged upstream, so `app_hal.cpp`,
+`platformio.ini`, and `pins.h` needed **zero** changes for this PR; citizen_410 only needed its own
+11 files plus one `#define ENABLE_FACE_CITIZEN_410` in `app_hal.h` and two registration lines
+(`init_face_citizen_410`/`update_check_citizen_410`) in `ui.c`. Verified the isolated branch
+actually builds standalone before pushing, not just "compiles as part of the big branch."
+
+**Extreme Power Save step 6 soak test came back confirmed: ~10x battery life improvement**,
+committed as-is (`9121f7c`, same ~85-line diff cont. 7 above described as pending). Before PR'ing
+it, walked through what "how contained is this to the Waveshare board" actually means in the code
+(not just asserted it): steps 3-6's *behavior* was already fully `#if ESPS3_2_06`-gated, and
+`platformio.ini` only defines that macro in one env (`lolin_s3_2_06`) - confirmed zero risk to
+other boards. But the Settings switch's *UI* (panel/icon/switch/label creation in `ui.c`, its event
+callback registration, and the saved-state restore in `hal_setup()`) was **not** gated the same
+way - every other one of the ~20 supported boards would've shown a working-looking toggle that
+silently does nothing. Fixed by wrapping those three specific call sites in `#if ESPS3_2_06` too
+(`5f2b328`) - deliberately *not* the four `lv_obj_t*` declarations or the two handler function
+bodies, which are harmless dead code elsewhere and don't need touching.
+
+**Extreme Power Save PR'd upstream: https://github.com/fbiego/esp32-c3-mini/pull/49**, same
+isolated-branch-off-`upstream/main` technique as citizen_410's PR, leading with the 10x result per
+user's explicit request. `app_hal.cpp`'s diff against upstream turned out to be 100% Extreme Power
+Save with nothing else mixed in (confirmed by grepping hunk headers), so that file came across
+wholesale; `ui.c` needed the same kind of surgical hand-reapplication as the citizen_410 PR did,
+since it's shared with face-registration lines that don't belong in this PR.
+
+**Screen Timeout dropdown: added 45 and 60 second options**, inserted between "30 Seconds" and
+"Always On" (`ui.c`'s `lv_dropdown_set_options` string). The stored preference is the raw dropdown
+*index*, not a duration value, and `setTimeout()` was previously computing durations off a `10000 *
+i` formula that only happened to work because every option was a multiple of 10 seconds - 45
+doesn't fit that pattern, so rewrote it as an explicit `timeoutDurations[]` array with an
+"always on if index == array length" sentinel, in **both** `hal/esp32/app_hal.cpp` and
+`hal/pico/app_hal.cpp` (duplicated logic, kept in sync - `hal/sdl2` doesn't implement timeout at
+all, left alone). **Known caveat, flagged to user, not silently fixed**: inserting the new options
+before "Always On" shifts its index from 4 to 6 - anyone with a previously-saved "Always On"
+preference (including this dev unit, mid-session) will read back as index 4 ("45 Seconds") until
+they revisit Settings and reselect it. User's call was to just re-pick it by hand rather than add a
+migration for a two-option dropdown change.
+
+**State as of end of session**: `gremlinDev` has the citizen_410 polish and both Extreme Power Save
+commits (`b46ebcb`, `9121f7c`, `5f2b328`) pushed. Timeout dropdown change (`ui.c`,
+`hal/esp32/app_hal.cpp`, `hal/pico/app_hal.cpp`) is flashed and confirmed working but **not yet
+committed** - straightforward, no open questions, just hasn't been asked for yet. Two upstream PRs
+open (#48 citizen_410, #49 Extreme Power Save), neither reviewed/merged yet as of this note.
