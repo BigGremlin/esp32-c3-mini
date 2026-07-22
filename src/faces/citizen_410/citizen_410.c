@@ -27,6 +27,15 @@ static lv_obj_t *batt_box     = NULL;
 static lv_obj_t *batt_shadow  = NULL;
 static lv_obj_t *batt_label   = NULL;
 
+// Soft "blur" halo behind each hard-edged shadow copy: LVGL's own shadow
+// style blurs a widget's rounded-rect box, not glyph shapes, so it can't
+// blur text directly - this fakes it with 4 extra low-opacity copies of the
+// shadow text at diagonal 1px offsets around the real shadow, same trick as
+// a cheap CSS multi-layer text-shadow blur.
+static lv_obj_t *day_shadow_halo[4]  = {NULL};
+static lv_obj_t *date_shadow_halo[4] = {NULL};
+static lv_obj_t *batt_shadow_halo[4] = {NULL};
+
 // Source photo was cropped/centered so the dial's true center lands at exactly
 // (205,205) in its own 410x410 image - confirmed by construction (crop was
 // centered on the bezel before any resize). This board reports 410x494, so -
@@ -70,6 +79,9 @@ static lv_obj_t *batt_label   = NULL;
 // the user's own "widen a touch" ask.
 #define DAY_LABEL_W 62
 #define DAY_LABEL_X ((DATE_BOX_W - DAY_LABEL_W) / 2)
+// Right-justified date number: same inset pattern as BATT_RIGHT_PAD below,
+// clears date_box's own rounded corner (radius 4).
+#define DATE_RIGHT_PAD 3
 
 // Left-hand LCD window (the "USA/EUR/JOU/CHN" gauge's neighbour panel), newly
 // wired up this pass to show battery %. True panel is x95-158,y200-231; box
@@ -105,6 +117,29 @@ static int32_t norm_angle_deci(float deg)
     while (deg < 0.0f) deg += 360.0f;
     while (deg >= 360.0f) deg -= 360.0f;
     return (int32_t)(deg * 10.0f);
+}
+
+static void create_shadow_halo(lv_obj_t *halo[4], lv_obj_t *parent, lv_text_align_t align,
+                                int16_t pad_right, int32_t base_x, int32_t base_y, int32_t w,
+                                const char *text)
+{
+    static const int8_t dx[4] = { -1,  1, -1, 1 };
+    static const int8_t dy[4] = { -1, -1,  1, 1 };
+    for (int i = 0; i < 4; i++)
+    {
+        lv_obj_t *h = lv_label_create(parent);
+        lv_obj_set_style_text_font(h, DATE_FONT, 0);
+        lv_obj_set_style_text_color(h, lv_color_hex(0x696969), 0);
+        lv_obj_set_style_text_align(h, align, 0);
+        if (pad_right) lv_obj_set_style_pad_right(h, pad_right, 0);
+        lv_obj_set_style_text_opa(h, LV_OPA_20, 0);
+        lv_obj_set_style_bg_opa(h, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(h, 0, 0);
+        lv_label_set_text(h, text);
+        lv_obj_set_pos(h, base_x + dx[i], base_y + dy[i]);
+        lv_obj_set_width(h, w);
+        halo[i] = h;
+    }
 }
 
 #endif
@@ -150,7 +185,8 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_set_size(date_box, DATE_BOX_W, DATE_BOX_H);
     lv_obj_set_pos(date_box, DATE_BOX_X, DATE_BOX_Y);
     lv_obj_set_style_bg_image_src(date_box, &face_citizen_410_lcd_bg, 0);
-    lv_obj_set_style_bg_opa(date_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_image_opa(date_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(date_box, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(date_box, 0, 0);
     lv_obj_set_style_radius(date_box, 4, 0);
     lv_obj_set_style_pad_all(date_box, 0, 0);
@@ -167,14 +203,17 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
        isn't clipped by this box's own (unchanged, 53px) bounds. */
     lv_obj_add_flag(date_box, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
 
+    create_shadow_halo(day_shadow_halo, date_box, LV_TEXT_ALIGN_CENTER, 0,
+                        DAY_LABEL_X + 3, 6, DAY_LABEL_W, "SUN");
+
     day_shadow = lv_label_create(date_box);
     lv_obj_set_style_text_font(day_shadow, DATE_FONT, 0);
-    lv_obj_set_style_text_color(day_shadow, lv_color_hex(0x5a5a5a), 0);
+    lv_obj_set_style_text_color(day_shadow, lv_color_hex(0x696969), 0);
     lv_obj_set_style_text_align(day_shadow, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_bg_opa(day_shadow, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(day_shadow, 0, 0);
     lv_label_set_text(day_shadow, "SUN");
-    lv_obj_set_pos(day_shadow, DAY_LABEL_X + 2, 3);
+    lv_obj_set_pos(day_shadow, DAY_LABEL_X + 3, 6);
     lv_obj_set_width(day_shadow, DAY_LABEL_W);
 
     day_label = lv_label_create(date_box);
@@ -184,14 +223,14 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_set_style_bg_opa(day_label, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(day_label, 0, 0);
     lv_label_set_text(day_label, "SUN");
-    lv_obj_set_pos(day_label, DAY_LABEL_X, 1);
+    lv_obj_set_pos(day_label, DAY_LABEL_X, 3);
     lv_obj_set_width(day_label, DAY_LABEL_W);
 
     /* Divider: thin LCD-style rule between day and date, sitting in the gap
        between the day baseline (~row 27) and the date row start (row 32). */
     lv_obj_t *day_date_divider = lv_obj_create(date_box);
     lv_obj_set_size(day_date_divider, DATE_BOX_W - 12, 2);
-    lv_obj_set_pos(day_date_divider, 6, 28);
+    lv_obj_set_pos(day_date_divider, 6, 29);
     lv_obj_set_style_bg_color(day_date_divider, lv_color_hex(0x5a5a5a), 0);
     lv_obj_set_style_bg_opa(day_date_divider, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(day_date_divider, 0, 0);
@@ -200,26 +239,31 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_remove_flag(day_date_divider, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(day_date_divider, LV_OBJ_FLAG_CLICKABLE);
 
+    create_shadow_halo(date_shadow_halo, date_box, LV_TEXT_ALIGN_RIGHT, DATE_RIGHT_PAD,
+                        3, 42, DATE_BOX_W, "01");
+
     date_shadow = lv_label_create(date_box);
     lv_obj_set_style_text_font(date_shadow, DATE_FONT, 0);
-    lv_obj_set_style_text_color(date_shadow, lv_color_hex(0x5a5a5a), 0);
-    lv_obj_set_style_text_align(date_shadow, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(date_shadow, lv_color_hex(0x696969), 0);
+    lv_obj_set_style_text_align(date_shadow, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_pad_right(date_shadow, DATE_RIGHT_PAD, 0);
     lv_obj_set_style_bg_opa(date_shadow, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(date_shadow, 0, 0);
     lv_label_set_text(date_shadow, "01");
-    lv_obj_set_pos(date_shadow, 2, 39);
+    lv_obj_set_pos(date_shadow, 3, 42);
     lv_obj_set_width(date_shadow, DATE_BOX_W);
 
     date_label = lv_label_create(date_box);
     lv_obj_set_style_text_font(date_label, DATE_FONT, 0);
     lv_obj_set_style_text_color(date_label, lv_color_black(), 0);
-    lv_obj_set_style_text_align(date_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(date_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_pad_right(date_label, DATE_RIGHT_PAD, 0);
     lv_obj_set_style_bg_opa(date_label, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(date_label, 0, 0);
     lv_label_set_text(date_label, "01");
     /* Nudged down ~1/4 character (DSEG14-18 line_height=18, so ~5px) per
        user request 2026-07-20. */
-    lv_obj_set_pos(date_label, 0, 37);
+    lv_obj_set_pos(date_label, 0, 39);
     lv_obj_set_width(date_label, DATE_BOX_W);
 
     /* ---- Battery window: left-hand LCD panel, same style as the date
@@ -229,7 +273,8 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_set_size(batt_box, BATT_BOX_W, BATT_BOX_H);
     lv_obj_set_pos(batt_box, BATT_BOX_X, BATT_BOX_Y);
     lv_obj_set_style_bg_image_src(batt_box, &face_citizen_410_lcd_bg_left, 0);
-    lv_obj_set_style_bg_opa(batt_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_image_opa(batt_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(batt_box, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(batt_box, 0, 0);
     lv_obj_set_style_radius(batt_box, 4, 0);
     lv_obj_set_style_pad_all(batt_box, 0, 0);
@@ -237,15 +282,18 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_remove_flag(batt_box, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_clip_corner(batt_box, true, 0);
 
+    create_shadow_halo(batt_shadow_halo, batt_box, LV_TEXT_ALIGN_RIGHT, BATT_RIGHT_PAD,
+                        3, 7, BATT_BOX_W, "100");
+
     batt_shadow = lv_label_create(batt_box);
     lv_obj_set_style_text_font(batt_shadow, BATT_FONT, 0);
-    lv_obj_set_style_text_color(batt_shadow, lv_color_hex(0x5a5a5a), 0);
+    lv_obj_set_style_text_color(batt_shadow, lv_color_hex(0x696969), 0);
     lv_obj_set_style_text_align(batt_shadow, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_pad_right(batt_shadow, BATT_RIGHT_PAD, 0);
     lv_obj_set_style_bg_opa(batt_shadow, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(batt_shadow, 0, 0);
     lv_label_set_text(batt_shadow, "100");
-    lv_obj_set_pos(batt_shadow, 2, 3);
+    lv_obj_set_pos(batt_shadow, 3, 7);
     lv_obj_set_width(batt_shadow, BATT_BOX_W);
 
     batt_label = lv_label_create(batt_box);
@@ -256,7 +304,7 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_set_style_bg_opa(batt_label, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(batt_label, 0, 0);
     lv_label_set_text(batt_label, "100");
-    lv_obj_set_pos(batt_label, 0, 1);
+    lv_obj_set_pos(batt_label, 0, 4);
     lv_obj_set_width(batt_label, BATT_BOX_W);
 
     /* ---- Clock hands: real sprites cut from the source photo, not drawn
@@ -282,10 +330,10 @@ void init_face_citizen_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_remove_flag(sec_hand, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *cap = lv_obj_create(face_citizen_410);
-    lv_obj_set_size(cap, 12, 12);
-    lv_obj_set_pos(cap, SCREEN_CX - 6, SCREEN_CY - 6);
+    lv_obj_set_size(cap, 8, 8);
+    lv_obj_set_pos(cap, SCREEN_CX - 4, SCREEN_CY - 4);
     lv_obj_set_style_radius(cap, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(cap, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_bg_color(cap, lv_color_hex(0xF41220), 0);
     lv_obj_set_style_bg_opa(cap, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(cap, 0, 0);
 
@@ -306,6 +354,11 @@ void update_time_citizen_410(int second, int minute, int hour, bool mode, bool a
     lv_label_set_text(day_label, DAY_NAMES[weekday % 7]);
     lv_label_set_text_fmt(date_shadow, "%02d", day);
     lv_label_set_text_fmt(date_label, "%02d", day);
+    for (int i = 0; i < 4; i++)
+    {
+        lv_label_set_text(day_shadow_halo[i], DAY_NAMES[weekday % 7]);
+        lv_label_set_text_fmt(date_shadow_halo[i], "%02d", day);
+    }
 
     float hour_angle = (hour % 12) * 30.0f + minute * 0.5f;
     float min_angle  = minute * 6.0f;
@@ -338,6 +391,10 @@ void update_status_citizen_410(int battery, bool connection){
 
     lv_label_set_text_fmt(batt_shadow, "%d", battery);
     lv_label_set_text_fmt(batt_label, "%d", battery);
+    for (int i = 0; i < 4; i++)
+    {
+        lv_label_set_text_fmt(batt_shadow_halo[i], "%d", battery);
+    }
 
 #endif
 }
