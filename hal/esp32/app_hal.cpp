@@ -2234,6 +2234,7 @@ void hal_setup()
   }
 #endif
 
+#if ESPS3_2_06
   if (extremePowerSave)
   {
     lv_obj_add_state(ui_extremePowerSaveSwitch, LV_STATE_CHECKED);
@@ -2242,6 +2243,7 @@ void hal_setup()
   {
     lv_obj_remove_state(ui_extremePowerSaveSwitch, LV_STATE_CHECKED);
   }
+#endif
 
   screenTimer.active = true;
   screenTimer.time = millis();

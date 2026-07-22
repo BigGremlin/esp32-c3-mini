@@ -3084,6 +3084,7 @@ void ui_settingsScreen_screen_init(void)
       lv_obj_set_y(ui_timeoutLabel, 0);
       lv_label_set_text(ui_timeoutLabel, "Screen Timeout");
 
+#if ESPS3_2_06
       ui_extremePowerSavePanel = lv_obj_create(ui_settingsList);
       lv_obj_set_width(ui_extremePowerSavePanel, 200);
       lv_obj_set_height(ui_extremePowerSavePanel, 64);
@@ -3124,6 +3125,7 @@ void ui_settingsScreen_screen_init(void)
       lv_obj_set_x(ui_extremePowerSaveLabel, 54);
       lv_obj_set_y(ui_extremePowerSaveLabel, 3);
       lv_label_set_text(ui_extremePowerSaveLabel, "Extreme Power Save");
+#endif
 
       ui_rotatePanel = lv_obj_create(ui_settingsList);
       lv_obj_set_width(ui_rotatePanel, 200);
@@ -3446,7 +3448,9 @@ void ui_settingsScreen_screen_init(void)
 #ifdef ENABLE_APP_NAVIGATION
       lv_obj_add_event_cb(ui_navStateSwitch, ui_event_navStateSwitch, LV_EVENT_ALL, NULL);
 #endif
+#if ESPS3_2_06
       lv_obj_add_event_cb(ui_extremePowerSaveSwitch, ui_event_extremePowerSaveSwitch, LV_EVENT_ALL, NULL);
+#endif
       lv_obj_add_event_cb(ui_timeoutSelect, ui_event_timeoutSelect, LV_EVENT_ALL, NULL);
       lv_obj_add_event_cb(ui_rotateSelect, ui_event_rotateSelect, LV_EVENT_ALL, NULL);
       // lv_obj_add_event_cb(ui_languageSelect, ui_event_languageSelect, LV_EVENT_ALL, NULL);
