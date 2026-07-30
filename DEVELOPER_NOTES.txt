@@ -2050,5 +2050,110 @@ Confirmed `pio run -e lolin_s3_2_06` builds clean: Flash 78.6% (7413881/9437184 
 Net flash saving vs the two-image version is essentially the old `dial_img` asset's whole size
 (~492KB: RGB565+alpha 410x410 = 504300 raw bytes) - `face_bg`'s raw byte count is identical to the
 old `body_bg` alone (410x494x2 = 405080 bytes) since only its pixel content changed, not its
-dimensions or format. **Not yet flashed to real hardware / visually confirmed on-device, not yet
-committed** - built and PNG-previewed only so far.
+dimensions or format. **Update same session: flashed to real hardware (3-segment method), running
+stable, user confirmed "That's fine" - committed `f8ae45b`, pushed to `origin/gremlinDev`.** Timeout
+dropdown change (previous section) also committed `efb260b` and pushed same session.
+
+
+2026-07-30 (cont.) — classic_410: ported "cogs" mechanical window from the original RetroPie
+prototype, three iterations so far, NOT YET COMMITTED
+------------------------------------------------------------------------------------------------
+User wanted the spinning-cogs decoration back - this project's `classic_410` face is itself a
+port of the user's own AnalogFace app (OLEDS3Watch-joaquim), which in turn traces back to the
+very first prototype of this whole watch-face concept: a standalone LVGL-linux simulator running
+on a RetroPie Pi at 192.168.0.37 (`/home/pi/lv_port_linux/src/watch_face.c`, LVGL 9.5.0, user
+account pi/raspberry). That prototype has a fully-working cogs window that never made it into
+either ESP32 port - OLEDS3Watch-joaquim's `app_analogface.cpp` has dead stub constants for it
+("Cog window hidden pending banding investigation") but no working implementation. Per user's
+explicit instruction (same SSH access pattern previously authorised for a different project),
+pulled the real implementation via `sshpass -p raspberry ssh pi@192.168.0.37`, read
+`create_gear()`/`create_mech_window()`/`gear_timer_cb()` directly off the Pi (not from the dead
+stub), and ported it into `classic_410.c`.
+
+**Iteration 1 - basic port, committed nowhere yet (superseded by iteration 2 same session):**
+Ported `create_gear()` near-verbatim (arc-widget rim + radial teeth + hub, each gear a plain
+`lv_obj` rotated as a whole via `transform_angle`/`transform_pivot_x/y` - LVGL applies a widget's
+transform to its full subtree, so rim+teeth+hub turn together despite being separate child
+objects). Added a `lv_timer_create(gear_timer_cb, 50, NULL)` running at the source's own 50ms
+cadence, gated with `if (lv_screen_active() != face_classic_410) return;` so it doesn't spend
+cycles animating when this face isn't the visible screen (no other face in this codebase uses a
+self-ticking `lv_timer` - existing ones are all driven by the shared once-a-second
+`update_check_*` cadence from `hal_loop()`, but that's too coarse for smooth gear rotation).
+Window: 128x83 rounded-rect, dark fill, red border, positioned at 12 o'clock 0.45*radius up from
+centre (same formula as the source's `create_mech_window()`). Numeral "12" skipped from Pass 3's
+draw loop (`i==0`) to avoid it, following this file's own existing convention for "3"/date-window
+rather than the source's literal "draw all 12, let the opaque window occlude it" approach. Build
+clean, flashed via the safe 3-segment method, booted stable. **User confirmed on-device: cogs
+spin, hands correctly pass in front near 12, "12" absence not an issue at this stage.**
+
+**Iteration 2 - keystone-shaped window, same session:** User asked for the window's top/bottom
+edges to become arcs concentric with the dial and its sides to become straight radial lines
+(instead of a rectangle) specifically so the top edge could sit *inside* the "12" numeral's own
+radius band and let "12" be drawn again. Radius math: numerals sit at a fixed radius 143 with a
+~44px-tall label box, i.e. occupy radius band ~121-165: the *original* rectangular window's flat
+top (at radius 128) actually already cut through the bottom of "12" even at dead centre, which is
+why iteration 1 had to skip drawing it at all. New constants `COG_OUTER_R=115`,
+`COG_INNER_R=32` (same 83px thickness as the old rect height, deliberately unchanged - user said
+"don't touch the cogs as tall at this time"), `COG_HALF_ANGLE_DEG=20` (picked so the wedge's top
+corners clear the "1"/"11" numerals at ±30°, verified numerically). Frame drawn as a new Pass 4
+on `dial_canvas` (filled arc-band via `lv_draw_arc` with `radius`=band midline,`width`=thickness,
+plus two border arcs at the outer/inner radii and two straight radial side lines) - kept as its
+own canvas pass rather than folded into Pass 1 to respect this file's existing ≤13-draw-tasks-
+per-pass rule (ported from OLEDS3Watch's own banding fix, ~~ same LVGL canvas layer-queue-overflow
+constraint applies here). `mech_win` (the gear-clipping rect) restyled fully transparent since the
+visible frame is now canvas-drawn behind it, and repositioned (not resized) to
+`SCREEN_CY - COG_OUTER_R` so it still lines up with the new frame - **gears themselves
+(`ga_x/y/r` etc.) left 100% untouched**, only the window around them moved. "12" numeral restored
+to Pass 3. Important LVGL gotcha hit here: `lv_draw_arc_dsc_t`'s `start_angle`/`end_angle` use a
+**different angle convention** than the clock-angle convention (0deg=12 o'clock, clockwise) used
+everywhere else in this file for ticks/hands/numerals - LVGL's arc angles are 0deg=3 o'clock,
+clockwise (confirmed by reading `lv_draw_arc.h`'s own doc comment, not assumed) - converted at the
+two points of use (`lvgl_angle = 270 + clock_angle`) rather than changing the shared convention.
+Build clean, flashed, booted stable. **User confirmed the shape looks right and "12" is back**,
+but also flagged (as fully expected/flagged in advance) that the untouched gear cluster - still
+sized/laid out for the old 128px-wide rectangle - now visibly overflows the new, narrower-at-the-
+bottom wedge shape, most visibly on the left-hand gear's left edge. User explicitly called this
+out as "an example of the erasing to be done" for the next step, i.e. confirmed a hard clip
+(matching what the rectangle's own edges already do today) is exactly the desired fix, not a
+symptom to redesign around.
+
+**Iteration 3 - double the angle, hard-clip gears to the keystone, two colour fixes, same session
+(current HEAD state, uncommitted):**
+1. `COG_HALF_ANGLE_DEG` 20 -> 40 (user: "double the angle between the 2 edge radii"). Verified
+   this still doesn't touch the "1"/"11" numerals - the outer radial excess at the *top* corners
+   was already there at 20 deg and is unaffected by widening the angle (it's a radius issue, not
+   an angle-span issue); the *bottom* corners' angular excess (already outside the cone at 20 deg,
+   still outside at 40 deg) is unaffected either way.
+2. **Erase mask ("a window is a window")**: LVGL 9.3 has no built-in way to clip a widget subtree
+   to an arbitrary (non-rectangular) shape - the old v8 angle/radius `lv_draw_mask_*` API is gone,
+   only `lv_draw_sw_mask_rect` (rectangle only) survives in this version (confirmed by grepping
+   the vendored LVGL source directly, not assumed). Worked around it with a same-size ARGB8888
+   overlay canvas (`lv_canvas_create` + `LV_COLOR_FORMAT_ARGB8888`, `w*h*4` buffer) positioned
+   exactly over `mech_win` and created *after* the gears so it paints on top of them: filled fully
+   transparent via `lv_canvas_fill_bg`, then a one-time (not per-frame - the sector shape is
+   static, only the gears under it animate) 128x83-pixel loop tests each pixel's radius/angle from
+   the dial centre (`atan2f(dx,-dy)` for the clock-angle convention, same conversion note as
+   above) and paints opaque black via `lv_canvas_set_px` wherever it falls outside the sector,
+   leaving the interior transparent so gear pixels show through untouched. ~10.6k pixel tests,
+   trivial one-off cost on an ESP32-S3.
+3. **Hub colour black -> white** (user: "the inside of the cogs is black, I think that should be
+   white") - `create_gear()`'s hub `bg_color` changed from `lv_color_black()` to
+   `lv_color_white()`.
+4. **Stray coloured "disc" on each gear's rim -> black** (user: "there is a disc on the outside of
+   the cog which should be black"). Root cause confirmed by reading LVGL's own default theme
+   source (`lv_theme_default.c`): **every** `lv_arc_create` widget gets an accent-coloured
+   circular knob (`theme->styles.knob`, `LV_PART_KNOB`, `bg_color=color_primary`,
+   `radius=CIRCLE`) applied automatically unless explicitly overridden - the RetroPie source never
+   disabled this (it apparently didn't matter/wasn't noticed there), so every gear's rim arc was
+   quietly getting a themed knob blob riding on it. Fixed by explicitly styling
+   `LV_PART_KNOB` on the rim arc: `bg_color=black`, `bg_opa=COVER`, `border_width=0`. Not resized
+   (default padding/radius left alone) - user only flagged the colour, not the size.
+
+Build clean (Flash 78.6%/7417261 bytes, negligible change from the widget-only code), flashed via
+the 3-segment method, booted stable (`Setup done`, no crash-loop; one `bootloader_mmap:
+spi_flash_mmap failed: 0x101` line seen once at boot, not obviously related to this display-only
+change, not chased). **Awaiting user's visual confirmation of iteration 3 on real hardware - not
+yet reviewed, not yet committed.** Working tree currently has one modified file,
+`src/faces/classic_410/classic_410.c` (+263 lines net across all three iterations, no separate
+commits made per-iteration - the whole cogs feature will land as one commit once confirmed
+working). `tools/facegen/__pycache__/` still untracked/ungitignored, still not touched.
