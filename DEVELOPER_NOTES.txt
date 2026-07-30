@@ -2007,3 +2007,48 @@ commits (`b46ebcb`, `9121f7c`, `5f2b328`) pushed. Timeout dropdown change (`ui.c
 `hal/esp32/app_hal.cpp`, `hal/pico/app_hal.cpp`) is flashed and confirmed working but **not yet
 committed** - straightforward, no open questions, just hasn't been asked for yet. Two upstream PRs
 open (#48 citizen_410, #49 Extreme Power Save), neither reviewed/merged yet as of this note.
+
+
+2026-07-30 — status check-in, both upstream PRs merged
+------------------------------------------------------------------------------------------------
+Picked the project back up; nothing changed in the repo since the 2026-07-22 session, so this is
+just a status correction. **Both PRs merged same day they were opened**: #48 (citizen_410) merged
+2026-07-22T15:07:52Z, #49 (Extreme Power Save) merged 2026-07-22T15:09:37Z - confirmed via `gh pr
+view`. The "neither reviewed/merged yet" line above is now stale.
+
+Timeout dropdown change committed (`efb260b`), same session - not yet pushed. Also noticed
+`tools/facegen/__pycache__/` is untracked and not in `.gitignore` - not touched, flagging for
+whenever someone's next in that area.
+
+**citizen_410: merged body_bg + dial_img into one baked asset, user's idea.** The face used two
+separate full-screen-ish images every frame: `face_citizen_410_body_bg` (410x494, opaque, the
+watch's case/crown/pushers/bracelet) drawn at (0,0), with `face_citizen_410_dial_img` (410x410,
+RGB565+alpha, the pattern-matched dial photo) drawn on top at `(DIAL_SHIFT_X, Y_OFFSET)` = (-3,
+42), its transparent corners letting body_bg show through in the four triangular gaps. Since
+body_bg was already re-cropped specifically to match wherever the dial lands (per its own header
+comment), there was no real reason left for two draws instead of one.
+
+Wrote `tools/facegen/merge_citizen_410_bg.py` (checked in, unlike the earlier one-off pivot-cap
+colour script) - parses both hand-authored asset `.c` files (they use a plain `_data[]` array name,
+not bin2lvgl's `_data_0[]`, so it doesn't reuse `lvgl_img.py`'s existing `parse_asset()` regex),
+decodes both to RGBA via `lvgl_img.decode_to_rgba`, alpha-composites dial onto body at the exact
+same offset citizen_410.c drew them at, flattens to opaque RGB565 (the merged image always fully
+covers the screen so no alpha channel is needed), and writes the new
+`face_citizen_410_face_bg.c`. Verified the composite visually (decoded back out to a PNG) before
+wiring it in - clean bezel edge, no seam, bracelet lugs land correctly in the corners.
+
+`citizen_410.c`/`.h` updated: single `face_bg` object/image instead of `body_bg`+`dial_img`, one
+`lv_image_create`+`lv_image_set_src`+`lv_obj_set_pos(0,0)` instead of two. `DIAL_SHIFT_X`/
+`Y_OFFSET` `#define`s kept - still feed `DATE_BOX_X/Y`, `BATT_BOX_X/Y`, `SCREEN_CX/CY` - but a
+comment now flags that re-nudging the dial requires re-running the merge script with a new
+`DIAL_SHIFT_X`, not just editing the `#define`, since the offset is now baked into the raster.
+Old `face_citizen_410_body_bg.c`/`face_citizen_410_dial_img.c` deleted (confirmed no other
+references first). `face_citizen_410_dial_img_preview` (the 160x160 face-picker thumbnail) is a
+separate asset, untouched.
+
+Confirmed `pio run -e lolin_s3_2_06` builds clean: Flash 78.6% (7413881/9437184 bytes), RAM 45.4%.
+Net flash saving vs the two-image version is essentially the old `dial_img` asset's whole size
+(~492KB: RGB565+alpha 410x410 = 504300 raw bytes) - `face_bg`'s raw byte count is identical to the
+old `body_bg` alone (410x494x2 = 405080 bytes) since only its pixel content changed, not its
+dimensions or format. **Not yet flashed to real hardware / visually confirmed on-device, not yet
+committed** - built and PNG-previewed only so far.
