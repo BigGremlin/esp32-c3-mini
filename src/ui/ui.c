@@ -3050,7 +3050,7 @@ void ui_settingsScreen_screen_init(void)
       lv_obj_set_style_pad_bottom(ui_timeoutPanel, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
 
       ui_timeoutSelect = lv_dropdown_create(ui_timeoutPanel);
-      lv_dropdown_set_options(ui_timeoutSelect, "5 Seconds\n10 Seconds\n20 Seconds\n30 Seconds\nAlways On");
+      lv_dropdown_set_options(ui_timeoutSelect, "5 Seconds\n10 Seconds\n20 Seconds\n30 Seconds\n45 Seconds\n60 Seconds\nAlways On");
       lv_obj_set_width(ui_timeoutSelect, 120);
       lv_obj_set_height(ui_timeoutSelect, LV_SIZE_CONTENT); /// 1
       lv_obj_set_x(ui_timeoutSelect, 20);
