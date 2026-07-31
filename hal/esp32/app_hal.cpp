@@ -37,6 +37,9 @@
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include "app_hal.h"
+#if ESPS3_2_06
+#include "esp_heap_caps.h"
+#endif
 
 #include "feedback.h"
 
@@ -1978,6 +1981,25 @@ static uint32_t my_tick(void)
 
 void hal_setup()
 {
+
+#if ESPS3_2_06
+  // ESP-IDF's malloc() only spills an allocation into the 8MB PSRAM once that single request
+  // exceeds a size threshold - anything smaller always comes from the ~183KB internal-only
+  // heap, no matter how many small requests pile up. LVGL's per-widget lv_obj_t/style structs
+  // are all individually well under any sane default threshold, so every one of them (ticks,
+  // numerals, hands, and now classic_410's ~36 gear/tooth/hub objects) has always landed
+  // exclusively in that scarce internal heap - the same heap BLE/WiFi's own DMA buffers must
+  // also come from. Confirmed via this board's own heapUsage() log + a live serial capture:
+  // internal heap at 98.66% used right at boot, "BLE_INIT: Malloc failed" logged immediately
+  // after - which is the actual root cause behind Extreme Power Save's on-battery wake
+  // sequence failing (screen_on() calls watch.begin() to restart BLE, which needs a chunk of
+  // this same exhausted internal heap). Lowering the spill threshold to 128 bytes lets nearly
+  // all of LVGL's small object allocations go to PSRAM instead, freeing internal RAM back up.
+  // DMA-requiring allocations (BLE/WiFi/display driver buffers) are unaffected - those request
+  // MALLOC_CAP_DMA explicitly, which PSRAM can't satisfy, so they still always land internal
+  // regardless of this setting.
+  heap_caps_malloc_extmem_enable(128);
+#endif
 
   Serial.begin(115200); /* prepare for possible serial debug */
   Serial1.begin(115200);

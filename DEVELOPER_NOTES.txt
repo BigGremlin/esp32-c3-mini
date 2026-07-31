@@ -2152,8 +2152,268 @@ symptom to redesign around.
 Build clean (Flash 78.6%/7417261 bytes, negligible change from the widget-only code), flashed via
 the 3-segment method, booted stable (`Setup done`, no crash-loop; one `bootloader_mmap:
 spi_flash_mmap failed: 0x101` line seen once at boot, not obviously related to this display-only
-change, not chased). **Awaiting user's visual confirmation of iteration 3 on real hardware - not
-yet reviewed, not yet committed.** Working tree currently has one modified file,
-`src/faces/classic_410/classic_410.c` (+263 lines net across all three iterations, no separate
-commits made per-iteration - the whole cogs feature will land as one commit once confirmed
-working). `tools/facegen/__pycache__/` still untracked/ungitignored, still not touched.
+change, not chased). Iteration 3 was confirmed working on hardware and committed (`cca23f8`).
+
+
+2026-07-30 (cont.) - wake-from-sleep-on-battery regression traced to internal-heap exhaustion,
+classic_410 cogs iterated heavily (window narrow/taper false start, teeth taper, colours,
+date window), 2151_410 month/day swap
+------------------------------------------------------------------------------------------------
+**Bug report: watch stopped waking from sleep on battery**, reported right after the cogs commit
+above. Confirmed the wake-path code itself (`deep_idle_loop()`/`on_battery()`, step 6) hadn't
+changed since its soak-tested, working commit (`9121f7c`) - so not a regression in that code
+directly. Root cause found via a live serial boot capture (not just static analysis): **internal
+heap at 98.66% used, `E BLE_INIT: Malloc failed` logged at every boot.** `include/lv_conf.h:47`
+hardcodes `LV_USE_STDLIB_MALLOC = LV_STDLIB_CLIB`, which overrides the `LV_MEM_SIZE`/`LV_MEM_CUSTOM`
+build flags in `platformio.ini` entirely (those only apply under `LV_STDLIB_BUILTIN`) - so
+`lv_malloc()` is plain `malloc()` on the same general heap BLE/WiFi need. ESP-IDF's allocator only
+spills a single allocation into the 8MB PSRAM once it exceeds a size threshold; anything smaller
+always comes from the tiny (~183KB) internal-only heap regardless of how many such small
+allocations pile up. classic_410's ~36 gear/tooth/hub `lv_obj_t` widgets (all well under that
+threshold) had been landing there permanently since boot, on top of everything else already
+enabled - tipping internal heap usage over the edge to where BLE's own re-init (`watch.begin()`,
+called from `screen_on()` on every wake) could no longer allocate.
+
+**Fix**: `heap_caps_malloc_extmem_enable(128)` added at the top of `hal_setup()`
+(`hal/esp32/app_hal.cpp`, `#if ESPS3_2_06`-gated), lowering the spill threshold so small
+allocations also go to PSRAM. Confirmed via two fresh serial boot captures: free internal heap
+2504 -> 12256 bytes, `BLE_INIT: Malloc failed` gone both times. **Not yet confirmed by an actual
+on-device battery wake test** - the boot-time BLE fix is verified, but nobody has yet pressed the
+button on unplugged hardware to confirm wake itself is restored. Ask before assuming it's fully
+fixed. A smaller, secondary fix landed first and is still in place: the cogs erase-mask canvas
+switched from ARGB8888 (4B/px, ~42.5KB) to A8 (1B/px, ~10.6KB) with `image_recolor` forcing it
+black - same visual result, less permanent allocation, though this turned out not to be the real
+fix (it's PSRAM either way, LV_MEM_SIZE build flags are dead code per the finding above).
+
+**classic_410 cogs, several more rounds of visual iteration** (all in
+`src/faces/classic_410/classic_410.c`, none committed yet):
+- Window narrowed: `COG_OUTER_R` 115->110, `COG_INNER_R` 32->37, then bottom (inner) arc raised
+  25% more per explicit request: 37->46. `COG_OUTER_R` unchanged at 110.
+- Date/day window: moved 3 o'clock -> 6 o'clock (Pass 3's skipped-numeral index changed to match,
+  `date_box` repositioned), then moved up in two more passes (radius-from-centre offset 143 ->
+  71 -> 40), before landing on 55 - halfway between the 40 and 71 passes, per explicit request
+  after "move up a bit more" turned out to be too far. Pass 3's numeral skip was removed
+  entirely partway through (date window no longer overlaps any numeral position once it's
+  between the centre and "6" rather than sitting on "6" itself), so all 12 numerals draw again.
+- Gear hub replaced with two pieces: a `body` ring (same colour as the teeth, sized to reach
+  `r - tooth_h` so it touches the teeth with no gap) and a much smaller, fixed-size `spool` at
+  the true centre (`22/8=2`, matching the smallest/rightmost gear's own hole size for all three
+  gears rather than each scaling its own via `r/8`). Original single white hub was wrong on two
+  counts per user feedback: the *whole* centre was white (should only be the middle ring, between
+  the true centre and the teeth) and it wasn't noticeably smaller than before.
+- Arc rim (`LV_PART_MAIN`) recoloured black instead of the shared metal grey - user described the
+  rim as "a circle running around the outside of the cog" that needed to be black. Combined with
+  a too-small `body_r` in the same pass, this produced a real visible bug: the (now invisible,
+  black-on-black) rim left a visible gap between the small body and the teeth, so the teeth read
+  as disconnected floating rectangles ("what am I looking at") - fixed by the `body_r = r -
+  tooth_h` sizing above, closing the gap.
+- Teeth colour darkened slightly (180,180,180 -> 160,160,160) and the body's fill changed to
+  match that same colour instead of white - they'd been visibly mismatched (grey teeth, white
+  body).
+- **Misstep, reverted**: "the cogs should be narrower on the outside compared to inside" was
+  misread as referring to the *window* (`COG_OUTER_R`/`COG_INNER_R`'s own vocabulary happened to
+  match), and implemented as a tapered-angle window (interpolated half-angle 40deg at the inner
+  edge to 25deg at the outer, applied to the fill via stacked rings, the border, and the erase
+  mask). User corrected: that whole sentence was a continuation of the *teeth* discussion (the
+  message's first two sentences), not the window - "you've fucked the window right up." Fully
+  reverted (window back to the original constant-angle sector, `cog_half_angle_at_r()` helper
+  removed). **Lesson: when a request bundles several small tweaks together, a later sentence
+  should be read as continuing the immediately-preceding subject unless it clearly changes topic
+  - don't let a coincidental name match (this file's own `COG_` constants) override that.**
+  Implemented properly on the teeth instead: each tooth split into two stacked pieces (a
+  full-width base near the gear body, a narrower (60%) tip at the outer edge) - a 2-step
+  approximation of a tapered gear-tooth profile, doubling tooth object count (30->60 total across
+  the three gears) but safe now given the PSRAM heap fix above routes these to PSRAM rather than
+  the scarce internal heap.
+
+**2151_410** (`src/faces/2151_410/2151_410.c`): month and day digit slots swapped
+(`update_time_2151_410()`) - whatever value fed the left digit pair now feeds the right and vice
+versa, so the two groups trade on-screen positions. No widget/position changes, just which value
+feeds which existing slot.
+
+**State at end of session**: three files modified, nothing committed -
+`hal/esp32/app_hal.cpp` (PSRAM heap fix), `src/faces/2151_410/2151_410.c` (month/day swap),
+`src/faces/classic_410/classic_410.c` (all the cogs iteration above). All flashed and verified on
+the device via `esptool verify-flash` digest checks after each change, but the cogs visual
+iteration in particular is still an open loop - last state flashed is the teeth-taper version,
+not yet confirmed by the user. `tools/facegen/__pycache__/` still untracked/ungitignored, still
+not touched. Mid-session the device's USB connection dropped and reappeared on its own a short
+time later (`/dev/ttyACM0` vanished, then came back) - treated as a physical/USB flake, not
+chased further, no code implicated.
+
+
+2026-07-31 - classic_410 cogs rebuilt as raster images (chrome art masked to a
+physically-correct meshing silhouette), replacing the widget-tree teeth entirely
+------------------------------------------------------------------------------------------------
+User's verdict on the teeth-taper widget version (photographed on real hardware): "look like
+shit", plus two direct questions that shaped the rest of this session - **why a 2-step
+stacked-rectangle taper instead of one simple trapezoid** (answer: `lv_obj_create` widgets can
+only fill an optionally-rounded rectangle via styling, there's no polygon/trapezoid primitive, so
+the 2-rect stack was a hack around that limit, not a real tapered shape), and **what the cogs
+actually cost on the ESP32** (answer, reasoned from config since `LV_USE_PERF_MONITOR` was never
+enabled: display is `LV_DISPLAY_RENDER_MODE_PARTIAL` and the mech window is only 128x64px, so the
+20Hz `gear_timer_cb` redraw is bounded to that tiny dirty rect regardless of gear complexity -
+unlikely to be "overloading" the chip, but the ~60-object teeth-taper version doubled the CPU cost
+of that redraw for zero visual gain given the "looks like shit" verdict).
+
+That cost/quality analysis led to a recommendation, accepted by the user: stop layering more
+widget hacks on a fundamentally rectangle-limited primitive, and bake each gear as one raster
+image instead (fewer objects - 3 rotated image blits total instead of ~69 separate widgets - and
+arbitrary shapes/anti-aliasing become trivial). Iterated in stages, each checked visually before
+moving on (screenshots sent via SendUserFile, not flashed until the shape itself was right):
+
+1. **Procedural placeholder** (`tools/facegen/gen_cogs_classic_410.py`): flat-grey gears with a
+   real single-polygon trapezoid tooth (base + tip radii, tapered angle, no more 2-rect stack),
+   annulus-sector "spoke" windows (same arc-top/arc-bottom/straight-radial-sides shape as the
+   main keystone window, per explicit request so a future hand-edit of the source PNG has
+   somewhere sensible to start from), and a spool hole. User caught two mismatches against the
+   already-flashed version: spool radius was 2.75px not the flashed `22/8=2` (integer-truncated),
+   and windows were plain circles, not window-shaped - both fixed.
+
+2. **Physically-correct teeth/rotation** ("scale these cogs correctly, with the correct number of
+   teeth and turn at the correct rate for interlocking teeth" - explicit user request, placement/
+   tangency deliberately left to the user to lock down later). Introduced a shared module
+   (`MODULE=4`): teeth count and pitch radius must satisfy `2*r/N == MODULE` for every gear in a
+   meshing train. The existing radii (34, 28, 22, chosen back when this was still a purely
+   decorative widget tree) happen to divide out to exact integers at module 4 - 17/14/11 teeth,
+   no rounding needed. Rotation rate is now derived, not chosen: meshing gears turn at
+   `omega * teeth = constant`, alternating direction along the a-b-c chain (b sits between and
+   meshes both, so spins opposite to both - already true of the old arbitrary +3/-4/+6 deltas,
+   only the magnitudes were wrong). `gear_timer_cb` now accumulates in float degrees (not the
+   integer-degree accumulator the old code used) so the non-integer per-tick deltas (e.g.
+   51/14 = 3.643 deg) don't compound rounding error - only the final `lv_image_set_rotation` call
+   rounds, the running total stays exact.
+
+3. **User's own hi-res chrome art** (`gear_{a,b,c}_hi.jpg`, dropped into
+   `assets/cogs_src/` - took two tries to find, first message said they'd added the files but
+   nothing had actually landed on this machine yet). AI-generated/rendered gears with a
+   chrome/bevel look, but with two problems for this use: a rounded highlight bevel that puffs
+   outside the flat tooth silhouette (real teeth can't mesh if their edges are rounded blobs -
+   user's own diagnosis, correct), and the artwork's own window/hole shapes/tooth counts, neither
+   matching the module-4 geometry above. User's instruction: "remove stuff outside your original
+   silhouette" - i.e. use the procedurally-correct shape as a hard mask over the new art, keeping
+   only its colour/texture.
+
+   `tools/facegen/mask_cogs_hi.py`: the hi-res art (1024x1024, near-white background) and the
+   procedural silhouette weren't pixel-registered (independently authored), so alignment is
+   detected rather than assumed - corner-seeded flood fill (4 corners, thresh=20 to absorb JPEG
+   noise around white) finds the true background region in the hi-res image; every hi-res gear's
+   teeth tips turned out to reach almost exactly to the 1024-canvas edge (outer radius ~504-512px
+   out of 512). `render_gear()` gained a `scale` parameter (zooms pitch_r/module/pad/spool
+   together, uniformly) so the *exact* procedural silhouette can be re-rendered at whatever pixel
+   density matches that detected radius, then pasted (as an alpha channel, not a colour paste) at
+   the detected centre onto a same-size transparent canvas holding the hi-res RGB. Cropped to the
+   alpha bbox for a compact master, downscaled (LANCZOS) to the original embed resolution
+   (82/70/58px, unchanged by any of this - purely geometric, from `pitch_r+module+pad`).
+
+   **Bug caught before it shipped**: the first masked result showed no transparency at the spool
+   hole at all. Root cause - `render_gear()`'s spool was drawn as opaque solid black
+   (`fill=(0,0,0,255)`), a leftover from the original flat-widget design where "hole" only ever
+   meant "paint it the same colour as the black dial behind it". That trick is silently wrong the
+   moment the mask is reused over anything that *isn't* a solid black dial (here, arbitrary hi-res
+   RGB) - fixed to a real alpha-0 hole (`fill=(0,0,0,0)`), which looks identical on the actual
+   black dial and is correct everywhere else too.
+
+   `tools/facegen/bake_cogs_to_c.py`: encodes whatever's currently in `cogs_src/gear_{a,b,c}.png`
+   (masked hi-res chrome, or a future hand-edit) to `src/faces/classic_410/assets/cogs_img.c`,
+   matching the codebase's existing asset convention exactly (`LV_COLOR_FORMAT_NATIVE_WITH_ALPHA`,
+   RGB565 colour plane + planar A8 alpha, `LV_IMG_DECLARE` in the face header) - deliberately a
+   separate script from the generator/masker so re-baking a hand-edited PNG never requires
+   regenerating or re-masking it.
+
+**`classic_410.c` changes**: `create_gear()` collapsed from ~115 lines building an arc + up to 60
+tooth objects + body + spool per gear, down to a single `lv_image_create()` +
+`lv_image_set_src()`/`lv_image_set_pivot()` per gear - `r` is still each gear's pitch radius (same
+value the silhouette was built from), positioned by its own centre since the baked image is
+slightly larger than `2r` (it includes tooth tips + padding). `gear_timer_cb` rewritten per the
+module-4 physics above. The mech-window/erase-mask/recentre logic above `create_gear()` is
+untouched - it already worked in absolute screen/window coordinates, independent of how each gear
+gets drawn.
+
+**Build**: `pio run -e lolin_s3_2_06` succeeds clean. Flash 79.1% (7461949 bytes, up from 78.6%
+before this session - the three baked images add a modest amount), RAM 45.4% (148660/327680,
+essentially unchanged - these are flash-resident `const` image data, not runtime heap).
+
+
+2026-07-31 (cont.) - raster cogs flashed: gear spacing was wrong, then a real mesh-phase
+puzzle that hardware disagreed with the math on, then the mech window itself resized/fixed
+------------------------------------------------------------------------------------------------
+**First flash of the raster gears came back badly wrong** - "do you have 3 different gears?".
+Decoded the actual bytes baked into `cogs_img.c` (not just the working PNGs) to check: yes, three
+correctly distinct 82x82/70x70/58x58 images, so not a data/encoding bug. Root cause was simpler:
+the raster images are `2*(r+module+pad)` across (82/70/58px), noticeably bigger than the *widget*
+gears they replaced (`2*r` = 68/56/44px) - `ga_x`/`gb_x`/`gc_x` were never updated for that, so at
+the old widget-tuned spacing the bigger images overlapped far more than intended (confirmed via a
+local PIL simulation of the exact same placement math before touching firmware again - much
+cheaper than another flash/photo round trip).
+
+**Exact-tangent mesh placement**: replaced the eyeballed `ga_x/gb_x/gc_x` with real geometry - two
+gears mesh exactly when centre-to-centre distance equals the sum of their pitch radii. Chain
+topology only (a-b mesh, b-c mesh, a and c don't touch) - three *mutually* meshing external gears
+in a closed triangle is a mechanically impossible odd cycle (same parity argument as a triangle not
+being 2-colourable), so this was never going to be a triangle regardless. Added `GEAR_GROUP_SCALE`
+(uniform shrink of both position and each gear's own `lv_image_set_scale`, since the raster images
+plus exact tangency no longer fit the 128x64 mech window uncropped) and `GEAR_MESH_CLEARANCE` (extra
+gap added on top of exact tangency, tuned live against user feedback across several flashes: 0 at
+narrow angles read "too close", 14 still narrow read "too far", 18 at wider angles read "still a
+tooth-length too far", 8 read closer but wanted "a tiny bit tighter", landed on 5).
+
+**The mesh-phase puzzle - math and hardware disagreed, hardware won.** Independent of spacing,
+gear_b's own baked tooth phase is arbitrary (whatever the hi-res source art happened to render) and
+unrelated to gear_a/c's - two gears meshing needs a *valley*, not a tooth, facing the contact point.
+Derived initial rotation offsets per gear from first principles (tooth 0 sits at clock-angle 0 in
+the baked art; a valley needs `contact_bearing - halfTooth` rotation) and snapped the b-c arm angle
+so `(bc_angle - ba_angle)` lands on an exact multiple of gear_b's own tooth pitch - meaning gear_b's
+one fixed tooth pattern should, in principle, face a valley toward *both* neighbours from a single
+rotation value. Verified this numerically (not just visually) two different ways - a local
+rotate-and-composite simulation, and a direct "nearest-tooth-offset" calculation - both agreed the
+derived phase gives the maximum possible valley clearance (not a tooth collision) at all four
+contact checks. **User reported the opposite from the real device, twice, independently, with a
+specific fix ("rotate the middle cog by half the angle between teeth")** - tried that fix in
+simulation first and it mathematically produces exact tooth-on-tooth collision by the same model,
+the polar opposite of what should help. Never found the actual discrepancy between the verified
+model and the hardware (checked the compiled macro expansion matched the Python model, checked the
+object file was newer than the source so it wasn't a stale build, checked the baked art's tooth-0
+position empirically against the "clock-angle 0" assumption - all consistent with the model being
+right). Applied the user's confirmed-on-hardware fix anyway (`GEAR_B_PHASE_DEG` simplifies to plain
+`GEAR_BC_CLOCK_DEG` now, i.e. the raw bearing with no half-tooth subtraction) and left a comment
+flagging the unresolved contradiction for whoever's next in this code. **Lesson: trust the person
+looking at the physical device over an internally-consistent theoretical model that can't be
+directly observed - two independent, specific, repeated reports beat re-deriving the same proof a
+third time.**
+
+**Mech window reshaped**, same session, once the gear mesh itself was confirmed good:
+- Radial sides: +-40deg -> +-30deg (11 and 1 o'clock exactly), per explicit request.
+- Both arcs brought toward each other by 22.5% of the *original* 64px gap (110-46), then - once
+  the heavier clipping on the gears themselves was confirmed to look good - pushed back apart again
+  by 7.3% of that same original measurement (not the already-narrowed one). Net: outer 110 -> 101,
+  inner 46 -> 55.
+- **Clipping bug #1, wrong fix first**: "top arc looks a bit messy, thin" - root cause was the gear
+  erase-mask (a same-rect overlay painting opaque black outside the sector) using the *exact* same
+  radius/angle bounds as the border's own 2px-wide stroke, with no allowance for the stroke's own
+  width - eating roughly half the outer arc's visible line. First attempt added an *outward* margin
+  to the mask's bounds to protect the border - wrong: confirmed on hardware this let the mask's real
+  clip boundary sit *past* the visible border line instead of at/inside it, so gear teeth could poke
+  out beyond the red line before finally getting cut off ("clipped on the outside of the window
+  defining lines rather inside"). Reverted that margin entirely (mask back to exact bounds) and
+  fixed the actual root cause instead: moved the red border (arcs + radial sides) off `dial_canvas`
+  (drawn early, so it sat *underneath* the mask in z-order) into its own small `border_canvas`
+  (ARGB8888, needs real colour + alpha unlike the black-only mask) created *after* the mask - the
+  border is now simply always on top, independent of however tightly the mask clips.
+- **Clipping bug #2**: "a straight horizontal clip on the bottom of the middle cog" - `mech_win`'s
+  own rectangle was sized to the bare sector height, so gear content that legitimately extends past
+  `COG_INNER_R` before the *curved* mask clips it was hitting the rectangle's own flat edge first.
+  Added `GEAR_RECT_PAD` (20px) - initially symmetric (both rect edges), which fixed this but created
+  a new problem (see next).
+- **Clipping bug #3, caused by fixing #2**: "number 11 is being clipped" - the symmetric padding
+  pushed the rect's *top* edge (which sits right at `COG_OUTER_R`) outward too, and the "11" numeral
+  bounding box (Pass 3) comes within about 1px of that same radius - close enough that even before
+  this session's changes it was already razor-thin, and the extra padding pushed the mask's opaque
+  fill far enough out to start covering part of "11". Fixed by making the padding bottom-only (only
+  `MECH_H` grows; `mech_y`/the rect's top edge is untouched) - the flat-clip fix didn't actually need
+  the top edge moved at all, only the bottom.
+
+**User confirmed this state looks good.** Committed and pushed same session (see git log for the
+actual commit) - this note plus `hal/esp32/app_hal.cpp` (PSRAM heap fix) and
+`src/faces/2151_410/2151_410.c` (month/day swap), both carried over uncommitted from the
+2026-07-30 session and mentioned there, landed in the same commit.

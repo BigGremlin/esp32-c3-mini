@@ -610,10 +610,10 @@ void update_time_2151_410(int second, int minute, int hour, bool mode, bool am, 
 	}
 	lv_img_set_src(face_2151_410_4_206548, face_2151_410_dial_img_4_206548_group[(am ? 0 : 1) % 2]);
 	lv_img_set_src(face_2151_410_22_233288, face_2151_410_dial_img_22_233288_group[((weekday + 6) / 1) % 7]);
-	lv_img_set_src(face_2151_410_23_246741, face_2151_410_dial_img_23_246741_group[(month / 1) % 10]);
-	lv_img_set_src(face_2151_410_24_246741, face_2151_410_dial_img_23_246741_group[(month / 10) % 10]);
-	lv_img_set_src(face_2151_410_25_246741, face_2151_410_dial_img_23_246741_group[(day / 1) % 10]);
-	lv_img_set_src(face_2151_410_26_246741, face_2151_410_dial_img_23_246741_group[(day / 10) % 10]);
+	lv_img_set_src(face_2151_410_23_246741, face_2151_410_dial_img_23_246741_group[(day / 1) % 10]);
+	lv_img_set_src(face_2151_410_24_246741, face_2151_410_dial_img_23_246741_group[(day / 10) % 10]);
+	lv_img_set_src(face_2151_410_25_246741, face_2151_410_dial_img_23_246741_group[(month / 1) % 10]);
+	lv_img_set_src(face_2151_410_26_246741, face_2151_410_dial_img_23_246741_group[(month / 10) % 10]);
 	lv_img_set_src(face_2151_410_44_255511, face_2151_410_dial_img_44_255511_group[(hour / 1) % 10]);
 	lv_img_set_src(face_2151_410_45_255511, face_2151_410_dial_img_44_255511_group[(hour / 10) % 10]);
 	lv_img_set_src(face_2151_410_46_255511, face_2151_410_dial_img_44_255511_group[(minute / 1) % 10]);

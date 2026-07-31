@@ -3,8 +3,9 @@
 // classic analog dial, ported from the user's own AnalogFace app in the
 // OLEDS3Watch-joaquim project (esp-brookesia, same physical hardware -
 // Waveshare ESP32-S3-Touch-AMOLED-2.06). Drawn entirely with LVGL canvas/line
-// primitives rather than pre-rasterized sprite images, so unlike the other
-// _410 faces there are no per-digit/per-frame image assets here at all.
+// primitives rather than pre-rasterized sprite images - the one exception is
+// the 12 o'clock cogs, which are baked raster images (assets/cogs_img.c, see
+// create_gear() below) rather than built from LVGL widget primitives.
 // Watchface: classic_410
 
 #include <math.h>
@@ -29,30 +30,81 @@ static lv_obj_t *date_label  = NULL;
 // LVGL-sim prototype (/home/pi/lv_port_linux/src/watch_face.c on the
 // 192.168.0.37 dev Pi, create_gear()/create_mech_window()/gear_timer_cb() -
 // pulled 2026-07-30 via SSH, same source this project's own dial/hands/ticks
-// were originally derived from). Three interlocking gears, each a real LVGL
-// widget (not canvas-drawn like the ticks/numerals above) so they can be
-// rotated independently via lv_obj_set_style_transform_angle.
+// were originally derived from). Three interlocking gears; originally each
+// was a widget tree (arc + ~20-60 tooth/body/spool lv_obj children rotated
+// together via lv_obj_set_style_transform_angle), replaced 2026-07-31 with a
+// single baked chrome-gear raster image per gear (assets/cogs_img.c),
+// rotated as a whole via lv_image_set_rotation - see create_gear() below.
 static lv_obj_t *mech_win    = NULL;
 static lv_obj_t *gear_layer  = NULL;
 static lv_obj_t *gear_a      = NULL;
 static lv_obj_t *gear_b      = NULL;
 static lv_obj_t *gear_c      = NULL;
-static int gear_a_ang = 0;
-static int gear_b_ang = 0;
-static int gear_c_ang = 0;
 static lv_timer_t *gear_timer = NULL;
 
 // Cogs window frame: an annulus sector centred on the dial, not a rectangle - top/bottom
 // edges are arcs concentric with the dial, left/right edges are straight radial lines (so
 // unlike a rectangle's corners, no part of the frame sticks out further from the dial centre
 // than its own outer edge - see the 2026-07-30 canvas pass below for the actual draw calls).
-// Radii chosen so the outer edge sits just inside hour_nums's "12" radius band (~121-165, see
-// Pass 3) so "12" can be drawn again; thickness (outer-inner) deliberately kept identical to
-// the gears' own original 83px window height - the gear positions/sizes below are untouched,
-// only this frame's shape and the window's overall on-screen position move to match it.
-#define COG_OUTER_R 115
-#define COG_INNER_R 32
-#define COG_HALF_ANGLE_DEG 40.0f
+// 2026-07-31: narrowed per explicit request - radial sides moved from +-40deg (11:40/12:20)
+// to +-30deg (11 and 1 o'clock exactly), and both arcs brought in by 22.5% of the original
+// 64px gap (110-46) toward each other (110->95.6, 46->60.4), then pushed back out again by
+// 7.3% of that same original 64px measurement (not the narrowed one) once the heavier
+// clipping on the gears themselves was confirmed to look good: 95.6+4.672=100.27,
+// 60.4-4.672=55.73, rounded to 101/55 (net of both passes: outer 110->101, inner 46->55).
+#define COG_OUTER_R 101
+#define COG_INNER_R 55
+#define COG_HALF_ANGLE_DEG 30.0f
+// First attempt at the "top arc looks thin/messy" clipping bug added an *outward* margin
+// to the mask's own bounds so it wouldn't eat the border's stroke - wrong fix, confirmed
+// on hardware: it let the mask's actual clip boundary sit *outside* the visible border
+// line instead of at/inside it, so gear teeth could poke out past the red line before
+// finally getting cut off. Reverted - the mask clips at the *exact* window bounds again
+// (no margin at all; see the real fix, a separate topmost border_canvas, further below).
+
+// Gears a/b/c have 17/14/11 teeth (tools/facegen/gen_cogs_classic_410.py, module 4:
+// 2*34/17 = 2*28/14 = 2*22/11 = 4 exactly - same tooth pitch on all three, so they
+// actually mesh instead of just spinning near each other). Needed here (not just by
+// gear_timer_cb below) for the phase-offset derivation right after.
+#define GEAR_A_TEETH 17.0f
+#define GEAR_B_TEETH 14.0f
+#define GEAR_C_TEETH 11.0f
+
+// Gear-mesh placement constants - see the exact-tangent derivation next to their use in
+// init_face_classic_410() below. GEAR_BA_CLOCK_DEG (bearing from b to a) was the original
+// hand-placed layout's angle, kept as-is; GEAR_BC_CLOCK_DEG (bearing from b to c) is
+// deliberately *not* the original hand-placed angle - it's snapped so that
+// (GEAR_BC_CLOCK_DEG - GEAR_BA_CLOCK_DEG) lands on an exact multiple of gear_b's own
+// tooth pitch (360/14 = 25.714deg). That's what makes gear_b's single fixed tooth
+// pattern able to face a *valley* toward both neighbours at once (see the phase-offset
+// #defines below) - without this snap, at most one of the two meshes can ever look
+// right, and which one drifts as the whole cluster's arm angle gets tuned. Reported as
+// "gear C's rotation looks wrong vs gear B" - this is the fix (both position AND the
+// dependent phase offsets below).
+#define GEAR_BA_CLOCK_DEG (-58.0f)
+#define GEAR_BC_CLOCK_DEG (GEAR_BA_CLOCK_DEG + 5.0f * (360.0f / GEAR_B_TEETH))
+// User feedback round-trip: no clearance (0, narrow angles) read as "too close" (teeth
+// interpenetrating heavily); +14px (still narrow angles) read as "too far apart"; +18px
+// (wider angles above) was flagged as still a tooth-length too far; +8px confirmed
+// closer but still wanted a *tiny* bit tighter.
+#define GEAR_MESH_CLEARANCE 5.0f
+#define GEAR_GROUP_SCALE 0.62f
+
+// Static initial rotation for each gear (added to gear_timer_cb's animation from then
+// on) so a *valley*, not a tooth, faces the neighbour it meshes with - tooth 0 sits at
+// clock-angle 0 in the baked art (gen_cogs_classic_410.py's render_gear: `a = i*2*pi/N`
+// starts at 0 = "up"), so facing a valley toward bearing `angle` needs a rotation of
+// `angle - (half a tooth pitch)`. gear_b only gets one shot at this (a single fixed
+// tooth pattern can't face two different directions at once) - the angle snap above
+// makes both neighbours land on the same tooth-pitch residue, so in principle one
+// rotation should satisfy both. On real hardware it didn't: user confirmed twice,
+// looking at the actual device, that gear_b specifically needed an *additional* half a
+// tooth-pitch rotation on top of that derivation to read as meshing rather than
+// tooth-on-tooth. Model says this shouldn't be needed - going with what's confirmed on
+// the physical part over the untested theory (`+ (180.0f / GEAR_B_TEETH)` at the end).
+#define GEAR_A_PHASE_DEG ((GEAR_BA_CLOCK_DEG + 180.0f) - (180.0f / GEAR_A_TEETH))
+#define GEAR_B_PHASE_DEG (GEAR_BC_CLOCK_DEG)
+#define GEAR_C_PHASE_DEG ((GEAR_BC_CLOCK_DEG + 180.0f) - (180.0f / GEAR_C_TEETH))
 
 static lv_point_precise_t hour_pts[2];
 static lv_point_precise_t min_pts[2];
@@ -74,96 +126,60 @@ static lv_point_precise_t sec_pts[2];
 
 static const char *const DAY_NAMES[7] = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
 
-// Ported near-verbatim from the RetroPie source's create_gear(): a gear as a
-// plain lv_obj (arc rim + radial teeth + a black hub with a coloured ring),
-// sized/positioned in the parent's own coordinate space and rotatable as one
-// unit via the object's own transform_angle (pivot set to its centre) - LVGL
-// applies a widget's transform to itself and its children together, so the
-// rim/teeth/hub all turn as a single gear despite being separate child objects.
-static lv_obj_t *create_gear(lv_obj_t *parent, int32_t x, int32_t y, int32_t r, int teeth, lv_color_t color)
+// A gear is now one baked chrome-gear image (assets/cogs_img.c, generated by
+// tools/facegen/{gen_cogs_classic_410,mask_cogs_hi,bake_cogs_to_c}.py from the
+// user's hi-res art, masked to the exact meshing silhouette: tooth count/taper/
+// pitch chosen so all three gears share one module - see gear_timer_cb below).
+// `r` is still each gear's *pitch* radius (same value the silhouette was built
+// from), not the image's own on-disk size - the image is slightly larger than
+// 2r (it includes the tooth tips and a little padding), so position it by its
+// own centre (x+r, y+r) rather than assuming a 2r x 2r bounding box.
+// `cx,cy` is this gear's true centre (not top-left) - scale is a transform around the
+// pivot (set to the image's own centre), so the object's position/pivot math doesn't need
+// to change with scale, only the drawn size does.
+static lv_obj_t *create_gear(lv_obj_t *parent, int32_t cx, int32_t cy, float scale, const lv_img_dsc_t *img)
 {
-    lv_obj_t *g = lv_obj_create(parent);
-    lv_obj_set_size(g, 2 * r, 2 * r);
-    lv_obj_set_pos(g, x, y);
+    lv_obj_t *g = lv_image_create(parent);
+    lv_image_set_src(g, img);
+    lv_obj_set_pos(g, cx - img->header.w / 2, cy - img->header.h / 2);
+    lv_image_set_pivot(g, img->header.w / 2, img->header.h / 2);
+    lv_image_set_scale(g, (uint32_t)lroundf(scale * 256.0f));
     lv_obj_remove_flag(g, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(g, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_opa(g, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(g, 0, 0);
-    lv_obj_set_style_pad_all(g, 0, 0);
-    lv_obj_set_style_transform_pivot_x(g, r, 0);
-    lv_obj_set_style_transform_pivot_y(g, r, 0);
-
-    lv_obj_t *arc = lv_arc_create(g);
-    lv_obj_set_size(arc, 2 * r, 2 * r);
-    lv_obj_set_pos(arc, 0, 0);
-    lv_obj_remove_flag(arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_arc_set_mode(arc, LV_ARC_MODE_NORMAL);
-    lv_arc_set_bg_angles(arc, 0, 360);
-    lv_obj_set_style_arc_width(arc, (r >= 30) ? 6 : 4, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(arc, color, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(arc, 0, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(arc, 0, 0);
-    // LVGL's default theme puts an accent-coloured circular knob on every arc widget
-    // (theme->styles.knob, LV_PART_KNOB) unless explicitly overridden - this is the stray
-    // "disc" that shows up riding the rim of each gear. Not part of the intended gear design
-    // at all, just an un-styled theme default; recolour it black to match the hub.
-    lv_obj_set_style_bg_color(arc, lv_color_black(), LV_PART_KNOB);
-    lv_obj_set_style_bg_opa(arc, LV_OPA_COVER, LV_PART_KNOB);
-    lv_obj_set_style_border_width(arc, 0, LV_PART_KNOB);
-
-    int32_t tooth_w = (r >= 30) ? 10 : 8;
-    int32_t tooth_h = (r >= 30) ? 10 : 8;
-
-    for (int i = 0; i < teeth; i++) {
-        float a = (i * 360.0f / teeth) * PI_F / 180.0f;
-        int32_t cx = r + (int32_t)lroundf((r - (tooth_h / 2)) * sinf(a));
-        int32_t cy = r - (int32_t)lroundf((r - (tooth_h / 2)) * cosf(a));
-
-        lv_obj_t *tooth = lv_obj_create(g);
-        lv_obj_set_size(tooth, tooth_w, tooth_h);
-        lv_obj_set_pos(tooth, cx - tooth_w / 2, cy - tooth_h / 2);
-        lv_obj_set_style_bg_color(tooth, color, 0);
-        lv_obj_set_style_bg_opa(tooth, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(tooth, 0, 0);
-        lv_obj_set_style_radius(tooth, 2, 0);
-        lv_obj_set_style_transform_pivot_x(tooth, tooth_w / 2, 0);
-        lv_obj_set_style_transform_pivot_y(tooth, tooth_h / 2, 0);
-        lv_obj_set_style_transform_angle(tooth, (int32_t)lroundf((i * 360.0f / teeth) * 10), 0);
-    }
-
-    lv_obj_t *hub = lv_obj_create(g);
-    int32_t hub_r = r / 3;
-    lv_obj_set_size(hub, 2 * hub_r, 2 * hub_r);
-    lv_obj_set_pos(hub, r - hub_r, r - hub_r);
-    lv_obj_set_style_radius(hub, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(hub, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(hub, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(hub, 2, 0);
-    lv_obj_set_style_border_color(hub, color, 0);
-    lv_obj_remove_flag(hub, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_remove_flag(hub, LV_OBJ_FLAG_CLICKABLE);
-
     return g;
 }
 
-// Same per-tick deltas/direction as the RetroPie source (a:+3, b:-4, c:+6
-// degrees per 50ms tick - the three gears turn at different speeds/directions
-// on purpose, it's decorative rather than a real meshed gear ratio). Only
-// does work while the classic face is actually the visible screen, so it
+// Meshing gears turn at a rate inversely proportional to their tooth count
+// (omega * teeth == constant across the train) and alternate direction gear-
+// to-gear along the a-b-c chain (b sits between and meshes both a and c, so
+// it turns opposite to both). K=51 keeps gear_a close to its old ~3deg/tick
+// pace; b and c are then *derived*, not independently chosen.
+#define GEAR_TRAIN_K 51.0f
+
+// Angle accumulators kept in float degrees (not the tenths-of-degree
+// lv_image_set_rotation itself takes) so the non-integer per-tick deltas
+// (e.g. 51/14 = 3.643 deg) don't drift from repeated rounding - only the
+// final lv_image_set_rotation call rounds, the running total stays exact.
+// Start from the GEAR_*_PHASE_DEG offsets derived above (not 0) so the meshed
+// look is correct from the very first frame, not just eventually by luck.
+static float gear_a_deg = GEAR_A_PHASE_DEG;
+static float gear_b_deg = GEAR_B_PHASE_DEG;
+static float gear_c_deg = GEAR_C_PHASE_DEG;
+
+// Only does work while the classic face is actually the visible screen, so it
 // doesn't spend cycles animating an off-screen watchface.
 static void gear_timer_cb(lv_timer_t *t)
 {
     LV_UNUSED(t);
     if (lv_screen_active() != face_classic_410) return;
 
-    gear_a_ang = (gear_a_ang + 3) % 360;
-    gear_b_ang = (gear_b_ang - 4 + 360) % 360;
-    gear_c_ang = (gear_c_ang + 6) % 360;
+    gear_a_deg = fmodf(gear_a_deg + (GEAR_TRAIN_K / GEAR_A_TEETH), 360.0f);
+    gear_b_deg = fmodf(gear_b_deg - (GEAR_TRAIN_K / GEAR_B_TEETH) + 360.0f, 360.0f);
+    gear_c_deg = fmodf(gear_c_deg + (GEAR_TRAIN_K / GEAR_C_TEETH), 360.0f);
 
-    lv_obj_set_style_transform_angle(gear_a, gear_a_ang * 10, 0);
-    lv_obj_set_style_transform_angle(gear_b, gear_b_ang * 10, 0);
-    lv_obj_set_style_transform_angle(gear_c, gear_c_ang * 10, 0);
+    lv_image_set_rotation(gear_a, (int32_t)lroundf(gear_a_deg * 10));
+    lv_image_set_rotation(gear_b, (int32_t)lroundf(gear_b_deg * 10));
+    lv_image_set_rotation(gear_c, (int32_t)lroundf(gear_c_deg * 10));
 }
 
 #endif
@@ -232,13 +248,13 @@ void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     }
     lv_canvas_finish_layer(dial_canvas, &layer);
 
-    /* ---- Pass 3: 11 hour numerals (skip 3 o'clock = date window) ---- */
+    /* ---- Pass 3: all 12 hour numerals - the date window now sits between the dial centre
+       and "6" rather than on top of it, so nothing needs to be skipped any more. ---- */
     static const char *hour_nums[12] = {
         "12", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"
     };
     lv_canvas_init_layer(dial_canvas, &layer);
     for (int i = 0; i < 12; i++) {
-        if (i == 3) continue;
         float a = i * 30.0f * PI_F / 180.0f;
         int32_t nx = CANVAS_CX + (int32_t)(sinf(a) * 143.0f);
         int32_t ny = CANVAS_CY - (int32_t)(cosf(a) * 143.0f);
@@ -251,15 +267,17 @@ void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     }
     lv_canvas_finish_layer(dial_canvas, &layer);
 
-    /* ---- Pass 4: cogs window frame - annulus sector (arc top/bottom, radial sides) ----
-       LVGL's own arc-angle convention (0deg = 3 o'clock, clockwise) differs from the
-       clock-angle convention (0deg = 12 o'clock, clockwise) used everywhere else in this
-       file for ticks/numerals/hands, so angles are converted at the point of use below
-       rather than changing the shared convention. */
+    /* ---- Pass 4: cogs window frame - dark band fill only. The red border (arcs + radial
+       sides) used to be drawn right here too, but that put it *underneath* the gear
+       erase-mask in z-order (mask created later, as a sibling of dial_canvas, paints over
+       whatever's below it in that region) - the mask had to carry an outward margin just
+       to avoid eating the border's own stroke, which then let gear teeth poke out past the
+       visible red line before the (now too-generous) mask finally clipped them. Moved to a
+       dedicated border_canvas created *after* the mask (see below), so the mask can clip
+       tightly at the exact window bounds and the border is simply always on top,
+       independent of that entirely. */
     lv_canvas_init_layer(dial_canvas, &layer);
     {
-        float half_a = COG_HALF_ANGLE_DEG * PI_F / 180.0f;
-
         // Filled band: a wide arc stroke, radius = band midline, width = band thickness.
         lv_draw_arc_dsc_t band; lv_draw_arc_dsc_init(&band);
         band.color = lv_color_hex(0x141414); band.opa = LV_OPA_COVER;
@@ -270,43 +288,16 @@ void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, l
         band.start_angle = 270.0f - COG_HALF_ANGLE_DEG;
         band.end_angle   = 270.0f + COG_HALF_ANGLE_DEG;
         lv_draw_arc(&layer, &band);
-
-        // Border: outer arc, inner arc, then the two radial sides as straight lines.
-        lv_draw_arc_dsc_t border; lv_draw_arc_dsc_init(&border);
-        border.color = lv_color_hex(0xFF0000); border.opa = LV_OPA_COVER;
-        border.center.x = CANVAS_CX; border.center.y = CANVAS_CY;
-        border.width = 2; border.rounded = 0;
-        border.start_angle = band.start_angle; border.end_angle = band.end_angle;
-
-        border.radius = COG_OUTER_R;
-        lv_draw_arc(&layer, &border);
-        border.radius = COG_INNER_R;
-        lv_draw_arc(&layer, &border);
-
-        lv_draw_line_dsc_t side; lv_draw_line_dsc_init(&side);
-        side.color = lv_color_hex(0xFF0000); side.width = 2; side.opa = LV_OPA_COVER;
-        side.round_start = side.round_end = 0;
-
-        side.p1.x = (int32_t)(CANVAS_CX + sinf(-half_a) * COG_OUTER_R);
-        side.p1.y = (int32_t)(CANVAS_CY - cosf(-half_a) * COG_OUTER_R);
-        side.p2.x = (int32_t)(CANVAS_CX + sinf(-half_a) * COG_INNER_R);
-        side.p2.y = (int32_t)(CANVAS_CY - cosf(-half_a) * COG_INNER_R);
-        lv_draw_line(&layer, &side);
-
-        side.p1.x = (int32_t)(CANVAS_CX + sinf(half_a) * COG_OUTER_R);
-        side.p1.y = (int32_t)(CANVAS_CY - cosf(half_a) * COG_OUTER_R);
-        side.p2.x = (int32_t)(CANVAS_CX + sinf(half_a) * COG_INNER_R);
-        side.p2.y = (int32_t)(CANVAS_CY - cosf(half_a) * COG_INNER_R);
-        lv_draw_line(&layer, &side);
     }
     lv_canvas_finish_layer(dial_canvas, &layer);
 
     lv_obj_clear_flag(dial_canvas, LV_OBJ_FLAG_HIDDEN);
 
-    /* ---- Date window - 3 o'clock ---- */
+    /* ---- Date window - between the dial centre and the "6" numeral. Radius offset 55 is
+       halfway between the previous pass's 40 and the pass before that's 71. ---- */
     date_box = lv_obj_create(face_classic_410);
     lv_obj_set_size(date_box, 136, 44);
-    lv_obj_set_pos(date_box, SCREEN_CX + 37, SCREEN_CY - 22);
+    lv_obj_set_pos(date_box, SCREEN_CX - 68, SCREEN_CY + 55 - 22);
     lv_obj_set_style_bg_color(date_box, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(date_box, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(date_box, lv_palette_main(LV_PALETTE_RED), 0);
@@ -331,7 +322,16 @@ void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, l
        the original rectangular-window version - same sizes, same layout relative to this rect. ---- */
     {
         const int32_t MECH_W = 128;
-        const int32_t MECH_H = COG_OUTER_R - COG_INNER_R;
+        // Padding beyond the sector's own radial span so gear content (which can legitimately
+        // extend past COG_INNER_R before the curved erase-mask clips it) doesn't hit mech_win's
+        // own flat rectangle edge first - that was "a straight horizontal clip on the bottom
+        // of the middle cog". Bottom-only, *not* symmetric: padding the top edge too (this
+        // rect's top sits right at COG_OUTER_R, and the "11" numeral's bounding box comes within
+        // ~1px of that same radius - see Pass 3) pushed the rect far enough out to newly start
+        // covering part of "11" with the mask's opaque fill. The top edge stays exactly at
+        // COG_OUTER_R; only MECH_H grows, extending the bottom edge further from centre.
+        const int32_t GEAR_RECT_PAD = 20;
+        const int32_t MECH_H = (COG_OUTER_R - COG_INNER_R) + GEAR_RECT_PAD;
         int32_t mech_x = SCREEN_CX - MECH_W / 2;
         int32_t mech_y = SCREEN_CY - COG_OUTER_R;
 
@@ -355,24 +355,55 @@ void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, l
         lv_obj_remove_flag(gear_layer, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(gear_layer, LV_OBJ_FLAG_CLICKABLE);
 
-        lv_color_t metal = lv_color_make(180, 180, 180);
-        const int32_t ga_x = 18,  ga_y = 20,  ga_r = 34;
-        const int32_t gb_x = 70,  gb_y = 44,  gb_r = 28;
-        const int32_t gc_x = 112, gc_y = 18,  gc_r = 22;
+        const int32_t ga_r = 34, gb_r = 28, gc_r = 22;
 
-        gear_a = create_gear(gear_layer, ga_x, ga_y, ga_r, 10, metal);
-        gear_b = create_gear(gear_layer, gb_x, gb_y, gb_r, 10, metal);
-        gear_c = create_gear(gear_layer, gc_x, gc_y, gc_r, 10, metal);
+        // Exact mesh placement: a chain (a-b mesh, b-c mesh; a and c do NOT mesh with each
+        // other) - matches gear_timer_cb's alternating a+/b-/c+ direction assumption, and is
+        // the only topology that *can* rotate at all: three mutually-meshing external gears
+        // in a closed triangle is a mechanically impossible odd cycle (going around the loop,
+        // each external mesh reverses direction, so after 3 reversals you're back to needing
+        // the first gear to spin both ways at once) - same parity argument as why a triangle
+        // isn't 2-colourable. Two circles mesh exactly when their centre-to-centre distance
+        // equals the sum of their pitch radii - the previous hand-placed positions only
+        // approximated this (~49px apart where 62px was required for a-b), which the old
+        // widget teeth could get away with visually but the raster images exposed as heavy
+        // overlap ("resized the cogs wrongly" - the images were fine, the *spacing* had
+        // always been approximate, just not visible until now).
+        //
+        // Arm directions below preserve the original hand-placed layout's angles (b->a up-
+        // left, b->c up-right, same asymmetry as before) in this file's existing clock-angle
+        // convention (0=up/12, +90=right/3, matches the erase-mask sector test below) - only
+        // the LENGTH changes, from eyeballed to exact. GEAR_GROUP_SCALE (exact-tangent spacing
+        // plus the raster images' own tooth-tip/padding margin makes the whole cluster wider/
+        // taller than the 128x64 mech window can show uncropped) scales position offsets AND
+        // each gear's own displayed size together - uniform, so it only changes absolute
+        // size, not the ratios meshing depends on.
+        float ba_dist = (float)(ga_r + gb_r + GEAR_MESH_CLEARANCE) * GEAR_GROUP_SCALE;
+        float bc_dist = (float)(gb_r + gc_r + GEAR_MESH_CLEARANCE) * GEAR_GROUP_SCALE;
+        float ba_rad = GEAR_BA_CLOCK_DEG * PI_F / 180.0f;
+        float bc_rad = GEAR_BC_CLOCK_DEG * PI_F / 180.0f;
+
+        // b is the reference point - NOT (0,0): gear_layer clips its own children to its
+        // declared 260x200 box by default (LVGL clips to parent bounds unless
+        // LV_OBJ_FLAG_OVERFLOW_VISIBLE is set, which it isn't), so a and c's up-left/up-right
+        // offsets from b would silently vanish if b were at the origin and they ended up at
+        // negative local coordinates. b is placed comfortably inside that box instead; the
+        // recentre step below shifts gear_layer's own position afterwards regardless (that
+        // shift isn't clipped, only the children's positions relative to gear_layer are).
+        float bx = 130.0f, by = 100.0f;
+        float ax = bx + sinf(ba_rad) * ba_dist, ay = by - cosf(ba_rad) * ba_dist;
+        float ccx = bx + sinf(bc_rad) * bc_dist, ccy = by - cosf(bc_rad) * bc_dist;
+
+        gear_a = create_gear(gear_layer, (int32_t)lroundf(ax), (int32_t)lroundf(ay), GEAR_GROUP_SCALE, &classic_410_gear_a_img);
+        gear_b = create_gear(gear_layer, (int32_t)lroundf(bx), (int32_t)lroundf(by), GEAR_GROUP_SCALE, &classic_410_gear_b_img);
+        gear_c = create_gear(gear_layer, (int32_t)lroundf(ccx), (int32_t)lroundf(ccy), GEAR_GROUP_SCALE, &classic_410_gear_c_img);
 
         // Recentre the group of three gear centres inside the MECH_W x MECH_H window by
         // shifting gear_layer as a whole (same approach as the source).
-        float cax = (float)ga_x + ga_r, cay = (float)ga_y + ga_r;
-        float cbx = (float)gb_x + gb_r, cby = (float)gb_y + gb_r;
-        float ccx = (float)gc_x + gc_r, ccy = (float)gc_y + gc_r;
-        float minx = cax, maxx = cax, miny = cay, maxy = cay;
-        if (cbx < minx) minx = cbx; if (cbx > maxx) maxx = cbx;
+        float minx = ax, maxx = ax, miny = ay, maxy = ay;
+        if (bx < minx) minx = bx; if (bx > maxx) maxx = bx;
         if (ccx < minx) minx = ccx; if (ccx > maxx) maxx = ccx;
-        if (cby < miny) miny = cby; if (cby > maxy) maxy = cby;
+        if (by < miny) miny = by; if (by > maxy) maxy = by;
         if (ccy < miny) miny = ccy; if (ccy > maxy) maxy = ccy;
         float group_cx = (minx + maxx) * 0.5f, group_cy = (miny + maxy) * 0.5f;
         float target_cx = (float)MECH_W * 0.5f, target_cy = (float)MECH_H * 0.5f;
@@ -381,18 +412,23 @@ void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, l
         // Erase mask: "a window is a window" - anything the gears draw outside the actual
         // keystone shape (not just the rectangular gear_layer clip) needs to disappear, same
         // hard edge the rectangle already gives on its own sides. Since LVGL has no built-in
-        // way to clip a widget tree to an arbitrary sector, this is done as a same-size ARGB
+        // way to clip a widget tree to an arbitrary sector, this is done as a same-size
         // overlay canvas sitting on top of the gears (created after them, so it paints over
-        // them), opaque black everywhere in the MECH_W x MECH_H rect that's NOT inside the
-        // sector (radius/angle test per pixel, done once at init - the sector itself is
-        // static, only the gears under it rotate), fully transparent everywhere inside it so
-        // the gears show through untouched.
-        void *mask_buf = lv_malloc(MECH_W * MECH_H * 4);
+        // them), opaque everywhere in the MECH_W x MECH_H rect that's NOT inside the sector
+        // (radius/angle test per pixel, done once at init - the sector itself is static, only
+        // the gears under it rotate), fully transparent everywhere inside it so the gears show
+        // through untouched. Mask only ever needs black-or-nothing, so this is an A8
+        // (1 byte/px alpha-only) buffer with image_recolor forcing the opaque pixels to black,
+        // not ARGB8888 (4 bytes/px) - same visual result at 1/4 the permanent heap footprint
+        // (this buffer is never freed, it has to stay resident for every subsequent frame).
+        void *mask_buf = lv_malloc(MECH_W * MECH_H * 1);
         if (mask_buf) {
             lv_obj_t *mask_canvas = lv_canvas_create(face_classic_410);
-            lv_canvas_set_buffer(mask_canvas, mask_buf, MECH_W, MECH_H, LV_COLOR_FORMAT_ARGB8888);
+            lv_canvas_set_buffer(mask_canvas, mask_buf, MECH_W, MECH_H, LV_COLOR_FORMAT_A8);
             lv_obj_set_pos(mask_canvas, mech_x, mech_y);
             lv_obj_remove_flag(mask_canvas, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_style_image_recolor(mask_canvas, lv_color_black(), 0);
+            lv_obj_set_style_image_recolor_opa(mask_canvas, LV_OPA_COVER, 0);
             lv_canvas_fill_bg(mask_canvas, lv_color_black(), LV_OPA_TRANSP);
 
             for (int32_t py = 0; py < MECH_H; py++) {
@@ -408,6 +444,62 @@ void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, l
                     }
                 }
             }
+        }
+
+        // Border (red arcs + radial sides): a small ARGB8888 canvas (needs real colour +
+        // per-pixel alpha, unlike the black-only mask above) created *after* mask_canvas so
+        // it always paints on top of it - the border is then simply never affected by the
+        // mask's clipping at all, however tight, which is what actually fixes "top arc
+        // looks messy/thin" without reintroducing the "clips outside the window lines"
+        // problem the first (margin-based) attempt caused.
+        void *border_buf = lv_malloc(MECH_W * MECH_H * 4);
+        if (border_buf) {
+            lv_obj_t *border_canvas = lv_canvas_create(face_classic_410);
+            lv_canvas_set_buffer(border_canvas, border_buf, MECH_W, MECH_H, LV_COLOR_FORMAT_ARGB8888);
+            lv_obj_set_pos(border_canvas, mech_x, mech_y);
+            lv_obj_remove_flag(border_canvas, LV_OBJ_FLAG_CLICKABLE);
+            lv_canvas_fill_bg(border_canvas, lv_color_black(), LV_OPA_TRANSP);
+
+            // Same geometry as the band above and the old border, just re-expressed in
+            // border_canvas's own local coordinate space - its origin is (mech_x,mech_y) on
+            // screen, not dial_canvas's own (0,Y_OFFSET) origin, so the dial's true centre
+            // here is (bcx,bcy), not (CANVAS_CX,CANVAS_CY).
+            float half_a = COG_HALF_ANGLE_DEG * PI_F / 180.0f;
+            float bcx = (float)(CANVAS_CX - mech_x);
+            float bcy = (float)(SCREEN_CY - mech_y);
+
+            lv_layer_t blayer;
+            lv_canvas_init_layer(border_canvas, &blayer);
+
+            lv_draw_arc_dsc_t border; lv_draw_arc_dsc_init(&border);
+            border.color = lv_color_hex(0xFF0000); border.opa = LV_OPA_COVER;
+            border.center.x = (int32_t)lroundf(bcx); border.center.y = (int32_t)lroundf(bcy);
+            border.width = 2; border.rounded = 0;
+            border.start_angle = 270.0f - COG_HALF_ANGLE_DEG;
+            border.end_angle   = 270.0f + COG_HALF_ANGLE_DEG;
+
+            border.radius = COG_OUTER_R;
+            lv_draw_arc(&blayer, &border);
+            border.radius = COG_INNER_R;
+            lv_draw_arc(&blayer, &border);
+
+            lv_draw_line_dsc_t side; lv_draw_line_dsc_init(&side);
+            side.color = lv_color_hex(0xFF0000); side.width = 2; side.opa = LV_OPA_COVER;
+            side.round_start = side.round_end = 0;
+
+            side.p1.x = (int32_t)(bcx + sinf(-half_a) * COG_OUTER_R);
+            side.p1.y = (int32_t)(bcy - cosf(-half_a) * COG_OUTER_R);
+            side.p2.x = (int32_t)(bcx + sinf(-half_a) * COG_INNER_R);
+            side.p2.y = (int32_t)(bcy - cosf(-half_a) * COG_INNER_R);
+            lv_draw_line(&blayer, &side);
+
+            side.p1.x = (int32_t)(bcx + sinf(half_a) * COG_OUTER_R);
+            side.p1.y = (int32_t)(bcy - cosf(half_a) * COG_OUTER_R);
+            side.p2.x = (int32_t)(bcx + sinf(half_a) * COG_INNER_R);
+            side.p2.y = (int32_t)(bcy - cosf(half_a) * COG_INNER_R);
+            lv_draw_line(&blayer, &side);
+
+            lv_canvas_finish_layer(border_canvas, &blayer);
         }
     }
 

@@ -21,6 +21,9 @@ extern "C"
     extern lv_obj_t *face_classic_410;
 
     LV_IMG_DECLARE(face_classic_410_dial_img_preview_0);
+    LV_IMG_DECLARE(classic_410_gear_a_img);
+    LV_IMG_DECLARE(classic_410_gear_b_img);
+    LV_IMG_DECLARE(classic_410_gear_c_img);
 #endif
 
     void onFaceEvent(lv_event_t * e);
