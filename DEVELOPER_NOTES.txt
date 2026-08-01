@@ -2417,3 +2417,34 @@ third time.**
 actual commit) - this note plus `hal/esp32/app_hal.cpp` (PSRAM heap fix) and
 `src/faces/2151_410/2151_410.c` (month/day swap), both carried over uncommitted from the
 2026-07-30 session and mentioned there, landed in the same commit.
+
+------------------------------------------------------------------------------------------------
+2026-08-01 - batman_410: new face added, WIP, not yet flashed/tested on hardware
+------------------------------------------------------------------------------------------------
+New chronograph-style watchface, `src/faces/batman_410/`, following the same rebuild pattern as
+citizen_410: delivered as a generic standalone `batman_watchface.c/.h` (runtime SPIFFS PNG
+loading, its own create()/update() API) that assumed a different architecture than this project
+uses, so it was rebuilt from scratch as compiled-in `lv_img_dsc_t` assets with the real
+init_face_*/update_*_*/update_check_* convention. Two deliveries so far, both kept on disk for
+reference: the original `batman_watchface_410x494/` (messy geometry, numerals not evenly spaced,
+baked-in subdial numbers) and a redelivered "Fully Clean" `batman_v4_410x494/` (numerals sit on a
+real circle, both subdials blank, proper tapered/arrowhead hand art) - `batman_410.c` is built
+against the v4 art. Dial center and hand pivots were measured programmatically off the source PNG
+(thresholding tick-mark pixels, bounding-box/centroid) rather than eyeballed, per the comments in
+batman_410.c/.h. Two subdials only (running-seconds sweep + slow hour-style counter) - the 6
+o'clock position is fully taken by the bat emblem/numeral so there's no room for a third.
+
+Wired into the build: `ENABLE_FACE_BATMAN_410` in `hal/esp32/app_hal.h`, include + init/update
+calls in `src/common/generated_features.h` and `src/ui/ui.c`, same pattern as every other face.
+`pio run -e lolin_s3_2_06` compiles clean (RAM 45.4%, Flash 84.2%) but this has **not** been
+flashed or eyeballed on the real device yet - purely a compile-time verification, no confirmation
+the dial/hands/subdials actually look right or that the measured centers are correct in practice.
+
+Committed as work-in-progress rather than waiting for a hardware pass, so the state is on record
+before further changes. Left untracked (redundant with the extracted folders above, not needed to
+build): the three raw delivery zips under `src/faces/batman_410/` (`batman_watchface_410x494.zip`,
+its "(4)" duplicate, and the nested "(1)" duplicate inside `batman_watchface_410x494/`) - contents
+are identical to the already-extracted PNGs/README/`.c`/`.h` sitting next to them.
+
+Next: flash to hardware, check dial/hand alignment and subdial sweep behavior, then decide whether
+v4's art needs another pass or is good to confirm.

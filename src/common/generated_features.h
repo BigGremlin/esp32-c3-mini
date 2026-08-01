@@ -51,6 +51,8 @@
 #include "../faces/3589/3589.h"
 #include "../faces/simple_360/simple_360.h"
 #include "../faces/terminal_360/terminal_360.h"
+#include "../faces/batman_410/batman_410.h"
+#include "../faces/batman_410/batman_watchface_410x494/batman_watchface.h"
 #include "../faces/174_410/174_410.h"
 #include "../faces/174/174.h"
 #include "../faces/b_w_resized/b_w_resized.h"
