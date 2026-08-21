@@ -19,6 +19,14 @@
 // confirmed by overlaying crosshairs on the art. Still not a mathematically
 // perfect circle fit - this is AI-generated dial art - but noticeably tighter
 // than the first delivery.
+//
+// Rebuilt again 2026-08-20 with a v5 source package (batman_v5_410x494/) -
+// wider background (pillarboxed down to the 410x494 canvas) and hour/min/sec
+// hands with a baked-in hub+tail drawn at an angle, rotated straight during
+// pre-processing rather than as-authored. See that directory's README.md for
+// the pixel math and the HAND_BASE_DEG / HAND_*_PIVOT_* comments below for
+// how that changed the hand placement code. Sub-hand art (hand_sub) is still
+// the unchanged v4 asset - none was redelivered this round.
 // Watchface: batman_410
 
 #include <math.h>
@@ -40,14 +48,15 @@ static lv_obj_t *sub_hand_r  = NULL;  // right (blank) subdial, slow hour-style 
 #define CW 410
 #define CH 494
 
-// Main dial center: the "12" numeral/tick and the overall art are
-// horizontally centered on the 410-wide canvas, and no single measured
-// landmark (top tick vs. bottom "6" numeral vs. side "9"/"3" numerals, which
-// disagree with each other by tens of px on this non-geometric art) beat
-// simply using the canvas's own geometric center, which fell within a few px
-// of every measurement anyway.
+// Main dial center: re-measured 2026-08-20 against the v5 background - the
+// canvas's raw geometric center (CH/2 = 247) was ~15px too high. Found the
+// true center by locating the gold index ticks at the 3 and 9 o'clock
+// positions (thresholded gold pixels outside the numeral ring, at x~45-59
+// and x~359-366) - both sit at y=262, not 247, confirming the drawn dial
+// isn't vertically centered on the canvas. CX unaffected (tick x-midpoint is
+// 206, a rounding error from CW/2's 205).
 #define MAIN_CX (CW / 2)
-#define MAIN_CY (CH / 2)
+#define MAIN_CY 262
 
 // Subdial centers, measured from the tick-ring bounding box on each subdial
 // (see header comment). Right mirrors left around the canvas's horizontal
@@ -57,15 +66,35 @@ static lv_obj_t *sub_hand_r  = NULL;  // right (blank) subdial, slow hour-style 
 #define SUB_R_CX (CW - SUB_L_CX)
 #define SUB_R_CY 257
 
-// All 4 hand sprites (hand_hour/min/sec/sub) share the same authoring
-// convention: a uniform-width shaft with a small arrowhead flare only in the
-// last ~15% of the image, at the bottom edge - i.e. pivot end (blunt, near
-// the hub) at the sprite's top row, tip (flare) at the bottom row. Confirmed
-// by measuring opaque-pixel width per row in gen_batman_410.py's source
-// (constant width until y~85% of height, then widening to the bottom edge).
-// So each sprite's own "as drawn" pointing direction is straight down, i.e.
-// clock-angle 180 deg (0 = 12 o'clock/up, clockwise) before any rotation.
-#define HAND_BASE_DEG 180.0f
+// hand_sub still follows the original v4 authoring convention: uniform-width
+// shaft, pivot at the sprite's top row (blunt end), tip at the bottom row -
+// i.e. "as drawn" pointing straight down, clock-angle 180 (0 = 12 o'clock/
+// up, clockwise) before rotation. See its own lv_image_set_pivot(..., 6, 0)
+// call below.
+//
+// hand_hour/min/sec are v5 sprites (2026-08-20 delivery): each was rotated
+// during pre-processing (see batman_v5_410x494/README.md) so its tip points
+// straight up, i.e. clock-angle 0, before rotation - the opposite of
+// hand_sub's convention - and each keeps its own baked-in gold pivot hub +
+// counterweight tail, with the pivot point sitting inside the image rather
+// than at row 0 (see HAND_HOUR_PIVOT_* etc below).
+#define HAND_BASE_DEG 0.0f
+#define HAND_SUB_BASE_DEG 180.0f
+
+// Pivot point of each v5 hand sprite (hub center). Re-measured 2026-08-20
+// after a second downscale pass off the original (pre-v5-final-scale)
+// normalized hand crops - the first v5 delivery's hands were too long
+// (second hand overshot the bezel entirely). New target: second hand's
+// pivot-to-tip length just clears the dial's inner edge at 3 o'clock
+// (measured bezel inner edge at x=373 from MAIN_CX=205, i.e. radius 168;
+// tip length set to 165 for a few px of clearance) - hour/minute rescaled
+// by the same factor to keep their original relative proportions.
+#define HAND_HOUR_PIVOT_X 20
+#define HAND_HOUR_PIVOT_Y 104
+#define HAND_MIN_PIVOT_X 12
+#define HAND_MIN_PIVOT_Y 125
+#define HAND_SEC_PIVOT_X 12
+#define HAND_SEC_PIVOT_Y 166
 
 static int32_t norm_angle_deci(float deg)
 {
@@ -95,47 +124,56 @@ void init_face_batman_410(void (*callback)(const char*, const lv_img_dsc_t *, lv
     lv_obj_set_pos(face_bg, 0, 0);
     lv_obj_remove_flag(face_bg, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* ---- Clock hands: each sprite's pivot is its own top-center pixel (see
-       HAND_BASE_DEG note above), positioned so that pivot lands exactly on
-       its dial's center, then rotated. ---- */
+    /* ---- Clock hands: each v5 sprite's pivot is its own baked-in hub
+       center (see HAND_*_PIVOT_* above), positioned so that pivot lands
+       exactly on the dial center, then rotated. ---- */
     hour_hand = lv_image_create(face_batman_410);
     lv_image_set_src(hour_hand, &face_batman_410_hand_hour);
-    lv_obj_set_pos(hour_hand, MAIN_CX - 12, MAIN_CY);
-    lv_image_set_pivot(hour_hand, 12, 0);
+    lv_obj_set_pos(hour_hand, MAIN_CX - HAND_HOUR_PIVOT_X, MAIN_CY - HAND_HOUR_PIVOT_Y);
+    lv_image_set_pivot(hour_hand, HAND_HOUR_PIVOT_X, HAND_HOUR_PIVOT_Y);
     lv_obj_remove_flag(hour_hand, LV_OBJ_FLAG_SCROLLABLE);
 
     min_hand = lv_image_create(face_batman_410);
     lv_image_set_src(min_hand, &face_batman_410_hand_minute);
-    lv_obj_set_pos(min_hand, MAIN_CX - 9, MAIN_CY);
-    lv_image_set_pivot(min_hand, 9, 0);
+    lv_obj_set_pos(min_hand, MAIN_CX - HAND_MIN_PIVOT_X, MAIN_CY - HAND_MIN_PIVOT_Y);
+    lv_image_set_pivot(min_hand, HAND_MIN_PIVOT_X, HAND_MIN_PIVOT_Y);
     lv_obj_remove_flag(min_hand, LV_OBJ_FLAG_SCROLLABLE);
 
     sec_hand = lv_image_create(face_batman_410);
     lv_image_set_src(sec_hand, &face_batman_410_hand_second);
-    lv_obj_set_pos(sec_hand, MAIN_CX - 5, MAIN_CY);
-    lv_image_set_pivot(sec_hand, 5, 0);
+    lv_obj_set_pos(sec_hand, MAIN_CX - HAND_SEC_PIVOT_X, MAIN_CY - HAND_SEC_PIVOT_Y);
+    lv_image_set_pivot(sec_hand, HAND_SEC_PIVOT_X, HAND_SEC_PIVOT_Y);
     lv_obj_remove_flag(sec_hand, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *cap = lv_obj_create(face_batman_410);
-    lv_obj_set_size(cap, 8, 8);
-    lv_obj_set_pos(cap, MAIN_CX - 4, MAIN_CY - 4);
-    lv_obj_set_style_radius(cap, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(cap, lv_color_hex(0xFFD700), 0);
-    lv_obj_set_style_bg_opa(cap, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(cap, 0, 0);
+    // v5 hands carry their own baked-in gold hub, so the separately-drawn
+    // cap circle below is redundant - commented out rather than deleted in
+    // case we want the extra cap back on top (e.g. if the baked-in hub
+    // reads too small once on real hardware).
+    // lv_obj_t *cap = lv_obj_create(face_batman_410);
+    // lv_obj_set_size(cap, 8, 8);
+    // lv_obj_set_pos(cap, MAIN_CX - 4, MAIN_CY - 4);
+    // lv_obj_set_style_radius(cap, LV_RADIUS_CIRCLE, 0);
+    // lv_obj_set_style_bg_color(cap, lv_color_hex(0xFFD700), 0);
+    // lv_obj_set_style_bg_opa(cap, LV_OPA_COVER, 0);
+    // lv_obj_set_style_border_width(cap, 0, 0);
 
-    /* ---- Subdial hands: reuse the single hand_sub sprite on both dials. ---- */
-    sub_hand_l = lv_image_create(face_batman_410);
-    lv_image_set_src(sub_hand_l, &face_batman_410_hand_sub);
-    lv_obj_set_pos(sub_hand_l, SUB_L_CX - 6, SUB_L_CY);
-    lv_image_set_pivot(sub_hand_l, 6, 0);
-    lv_obj_remove_flag(sub_hand_l, LV_OBJ_FLAG_SCROLLABLE);
+    /* ---- Subdial hands: reuse the single hand_sub sprite on both dials. ----
+       Removed 2026-08-20 at user request ("remove vector drawing of smaller
+       chronos dials, leave those alone for now") - the two subdial *faces*
+       (raster, baked into face_bg) stay as-is, only the little animated
+       needle sprites are pulled. Commented out, not deleted, in case they
+       come back once the subdials get real chronograph data behind them. */
+    // sub_hand_l = lv_image_create(face_batman_410);
+    // lv_image_set_src(sub_hand_l, &face_batman_410_hand_sub);
+    // lv_obj_set_pos(sub_hand_l, SUB_L_CX - 6, SUB_L_CY);
+    // lv_image_set_pivot(sub_hand_l, 6, 0);
+    // lv_obj_remove_flag(sub_hand_l, LV_OBJ_FLAG_SCROLLABLE);
 
-    sub_hand_r = lv_image_create(face_batman_410);
-    lv_image_set_src(sub_hand_r, &face_batman_410_hand_sub);
-    lv_obj_set_pos(sub_hand_r, SUB_R_CX - 6, SUB_R_CY);
-    lv_image_set_pivot(sub_hand_r, 6, 0);
-    lv_obj_remove_flag(sub_hand_r, LV_OBJ_FLAG_SCROLLABLE);
+    // sub_hand_r = lv_image_create(face_batman_410);
+    // lv_image_set_src(sub_hand_r, &face_batman_410_hand_sub);
+    // lv_obj_set_pos(sub_hand_r, SUB_R_CX - 6, SUB_R_CY);
+    // lv_image_set_pivot(sub_hand_r, 6, 0);
+    // lv_obj_remove_flag(sub_hand_r, LV_OBJ_FLAG_SCROLLABLE);
 
     callback("Batman", &face_batman_410_dial_img_preview, &face_batman_410, &sec_hand);
 
@@ -158,15 +196,13 @@ void update_time_batman_410(int second, int minute, int hour, bool mode, bool am
     lv_image_set_rotation(min_hand, norm_angle_deci(min_angle - HAND_BASE_DEG));
     lv_image_set_rotation(sec_hand, norm_angle_deci(sec_angle - HAND_BASE_DEG));
 
-    // Decorative, not backed by real chronograph data (this face has no
-    // stopwatch feature wired in) - left subdial sweeps once per minute like
-    // a running-seconds register, right subdial once per 12h like a slow
-    // hour-style counter, matching the "animated sub-hands" behaviour the
-    // delivered design asked for.
-    float sub_l_angle = second * 6.0f;
-    float sub_r_angle = (hour % 12) * 30.0f + minute * 0.5f;
-    lv_image_set_rotation(sub_hand_l, norm_angle_deci(sub_l_angle - HAND_BASE_DEG));
-    lv_image_set_rotation(sub_hand_r, norm_angle_deci(sub_r_angle - HAND_BASE_DEG));
+    // Subdial hand sweep removed 2026-08-20 along with their creation above -
+    // see that comment. Left commented rather than deleted for the same
+    // reason.
+    // float sub_l_angle = second * 6.0f;
+    // float sub_r_angle = (hour % 12) * 30.0f + minute * 0.5f;
+    // lv_image_set_rotation(sub_hand_l, norm_angle_deci(sub_l_angle - HAND_SUB_BASE_DEG));
+    // lv_image_set_rotation(sub_hand_r, norm_angle_deci(sub_r_angle - HAND_SUB_BASE_DEG));
 
 #endif
 }

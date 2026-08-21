@@ -8,12 +8,20 @@ from PIL import Image
 # project's compiled-in lv_img_dsc_t convention - see src/faces/batman_410/
 # batman_watchface_410x494.zip's own README) into the project's normal asset
 # shape, same as merge_citizen_410_bg.py / gen_red_magic_410.py did for their
-# faces. Background is already authored at 410x494 (this project's standard
-# "content canvas" size, see citizen_410.c/classic_410.c SCREEN_H), so no
-# scaling/letterboxing math is needed here, unlike the _410-suffixed
-# conversions of other-resolution source faces.
+# faces. Background here is already pre-scaled to exactly 410x494 (this
+# project's standard "content canvas" size, see citizen_410.c/classic_410.c
+# SCREEN_H) before this script runs, so no scaling/letterboxing math is
+# needed in here itself.
+#
+# v5 (2026-08-20): source dir now batman_v5_410x494/, which already holds
+# pre-processed assets (background pillarboxed to 410x494, hands rotated
+# from their as-delivered diagonal pose to point straight up and rescaled to
+# the canvas) - see that directory's own README for the full pixel-math.
+# Unlike v4, these hand sprites carry a baked-in hub+tail with the pivot
+# point inside the image rather than at row 0, so batman_410.c's per-hand
+# pivot coordinates and HAND_BASE_DEG changed accordingly.
 
-SRC_DIR = "/home/greg/chronos-watch/src/faces/batman_410/batman_v4_410x494"
+SRC_DIR = "/home/greg/chronos-watch/src/faces/batman_410/batman_v5_410x494"
 OUT_DIR = "/home/greg/chronos-watch/src/faces/batman_410/assets"
 os.makedirs(OUT_DIR, exist_ok=True)
 

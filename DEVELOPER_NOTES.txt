@@ -2448,3 +2448,131 @@ are identical to the already-extracted PNGs/README/`.c`/`.h` sitting next to the
 
 Next: flash to hardware, check dial/hand alignment and subdial sweep behavior, then decide whether
 v4's art needs another pass or is good to confirm.
+
+------------------------------------------------------------------------------------------------
+2026-08-20 - batman_410: v5 hand/background rebuild + corner-vignette fix, flashed, awaiting
+confirmation on hardware
+------------------------------------------------------------------------------------------------
+New source delivery, `batman_v5_410x494/` (replaces v4 as `gen_batman_410.py`'s `SRC_DIR`): wider
+background and hour/min/sec hands redrawn with a baked-in gold pivot hub + counterweight tail
+(previously the hub was a separately-drawn LVGL circle "cap" on top of hub-less straight hands).
+`hand_sub` is unchanged v4 art - none redelivered this round.
+
+Processing (scripts lived in a *different* session's scratchpad,
+`/tmp/claude-1000/-home-greg/2a2d94ab-599a-47bc-9bd1-5462a23c4e32/scratchpad/proc_hands.py` +
+`proc_all.py` - not checked into the repo, same as v4's equivalent step; full pixel-math written
+up in `batman_v5_410x494/README.md` instead):
+- Background scaled to canvas height (494px, factor 0.315051 from the 1264x1568 delivered art),
+  giving 398px width, pillarboxed with 6px black bars each side to reach the 410px canvas.
+- Each hand's hub found by flood-filling in from the sprite's transparent border and taking the
+  largest *enclosed* transparent region (the drilled pivot hole), then rotated about that hub so
+  the tip points to clock-angle 0 (up) instead of its as-delivered diagonal pose, then cropped
+  tight. Minute hand's pivot-to-tip length corrected to 521px (pre-resize scale) per instruction
+  before the final background-matching scale pass.
+
+`batman_410.c` changes to match: `HAND_BASE_DEG` flipped 180 -> 0 for hour/min/sec (new sprites
+point up, not down, as authored); added `HAND_SUB_BASE_DEG = 180` since hand_sub kept the old
+convention; added per-hand `HAND_{HOUR,MIN,SEC}_PIVOT_{X,Y}` constants (v5 hands carry the pivot
+inside the image, not at row 0) and switched the hand `lv_obj_set_pos`/`lv_image_set_pivot` calls
+to use them. Old code-drawn gold cap circle commented out, not deleted, in case the baked-in hub
+reads too small on real hardware and the extra cap is wanted back.
+
+**Corner-vignette bug, found from a composited preview render** (`preview2_1010_30.png`, same
+scratchpad dir - hands overlaid on the new bg at a fixed 10:10:30 to eyeball placement without a
+hardware pass): user confirmed hand placement/overall look was correct, but the source art is a
+studio-style "product photo" of a watch case, and the canvas corners - outside the case's rounded
+bezel, beyond where the case photo actually extends - carry a soft gray vignette gradient
+(~R35-45) rather than flat black, worst at the two bottom corners where the case sits inset from
+the bottom edge by roughly 50px (not flush like the top edge is). On the physical AMOLED this would
+show as a visible gray patch instead of blending into the device's own black bezel.
+
+Fix intentionally *not* a simple global brightness-threshold flood fill: the dial art itself is
+dark-toned throughout (numerals, subdial interiors, tick-mark gaps all sit in a similar low
+brightness range to the vignette), so an unbounded fill from the border risked leaking straight
+through the case's thin dark rim outline and eating the entire face. Used a spatially-capped BFS
+flood fill instead (scratchpad `blacken_border.py`, N=60px max distance from the nearest canvas
+edge, brightness threshold 45) - the distance cap is a hard, color-independent backstop, so even a
+dark contiguous path can never reach past ~60px from an edge regardless of the threshold match,
+which is comfortably short of any real dial content (bezel ring alone measured ~40px thick).
+Verified all 4 corners individually (zoomed crops) after the fill: ticks, "FRI"/"78%" labels,
+numerals, and the bezel's metal highlight curve all intact, only the actual background wedge
+went to pure black. First attempt (small fixed per-corner boxes, no full-perimeter coverage) missed
+the bottom-edge margin strip between the corners - superseded by the perimeter-band version.
+
+Original (pre-fix) `batman_bg_410x494.png` backed up to this session's own scratchpad as
+`batman_bg_410x494.png.orig` before being overwritten in `batman_v5_410x494/` with the corrected
+version; `gen_batman_410.py` re-run to regenerate all six compiled assets from it.
+`pio run -e lolin_s3_2_06` built clean (RAM 45.4%, Flash 84.8%) and was flashed to the watch over
+`/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_80:B5:4E:F3:30:F4-if00`.
+
+**Not yet committed** - user wants to eyeball the real screen (does the corner-black fix actually
+read right against the device's physical bezel, does the v5 hand art hold up) before confirming.
+Working tree currently has all of `batman_410.c`, the six `assets/*.c` files, `gen_batman_410.py`,
+and the new untracked `batman_v5_410x494/` source dir sitting uncommitted; the stray delivery zips
+noted in the 2026-08-01 entry are still present untracked and still not needed for the build.
+
+Next: get hardware feedback from user on this state, then either commit as-is or iterate
+(candidates already flagged: baked-in hub size vs the old cap, whether the corner fix threshold
+needs retuning anywhere) before committing.
+
+------------------------------------------------------------------------------------------------
+2026-08-20 (cont.) - batman_410: hands shrunk + re-anchored to measured true center, subdial
+needle sprites pulled - flashed, still awaiting hardware confirmation, still NOT committed
+------------------------------------------------------------------------------------------------
+User feedback on the previous flash (before any hardware photo/description was given, just verbal):
+hands too big (need re-resizing smaller, starting from the original hand images in the old
+scratchpad, not from the already-downscaled v5 crops - avoids compounding a second lossy resize on
+top of the first), second hand specifically should land just inside the bezel at 3 o'clock, and the
+dial center is measurably lower than the canvas geometric midpoint used so far (`MAIN_CY = CH/2`) -
+should instead line up with the 3/9 o'clock ticks. Also: stop drawing the little needle sprites on
+the two subdial faces ("vector drawing of smaller chronos dials") but leave the subdial faces
+themselves alone for now.
+
+**True center measurement**: thresholded the background for near-white minute ticks first (found
+the regular ticks at x~49/x~363 evenly spaced every ~17px in y, but with one missing right at the
+3/9 o'clock position) - the 3/9 index tick turned out to be gold, not white, unlike every other
+tick on the dial. Found it directly: y=262, both sides agree exactly. That's 15px below the
+previous `MAIN_CY` (247 = CH/2). `MAIN_CX` needed no change (tick x-midpoint 206 vs CW/2's 205,
+within rounding). This matters for *all* hand placement, not just cosmetics - every pivot position
+in the file is `MAIN_CX/CY` relative.
+
+**Hand rescale**: re-measured raw (pre-final-scale) pivot-to-tip lengths off the `normalized/*.png`
+crops sitting in the *other* session's scratchpad (`2a2d94ab-.../scratchpad/normalized/`, the
+rotated-but-not-yet-canvas-scaled stage from the v5 pipeline) via `proc_hands.py`'s own
+`find_hub`/`tip_tail` - hour 434.5px, minute 521.5px, second 691.5px at that stage. Measured the
+dial's actual usable radius at 3 o'clock straight from the (now correctly-centered) background:
+scanned row y=262 rightward from center, found the bezel's inner edge (where the metal ring starts
+rising out of black) at x=373, i.e. radius 168 from `MAIN_CX=205`. Set second hand's target
+pivot-to-tip to 165 (a few px inside 168, "just within" rather than touching) and derived a single
+scale factor from that (165/691.5 = 0.23861), applied uniformly to all three raw lengths so their
+relative proportions stay as originally authored - hour 103.0, minute 123.5, second 165.0 (measured
+back off the actual resized+recropped images, matches target closely). Verified with a from-scratch
+PIL compositor (scratchpad `composite_preview.py`, not the earlier session's - hub-rotate math
+reused from `proc_hands.py` but the paste/rotate/save loop is new) rendered at both 10:10:30 (normal
+look) and 3:00:15 (dedicated second-hand-at-3-o'clock check) - zoomed crop of the second hand tip
+confirmed a clean few-px gap before the bezel, not touching it.
+
+New hand PNGs written back into `batman_v5_410x494/` (`hand_hour.png`/`hand_min.png`/
+`hand_sec.png`, overwriting the first v5 delivery's already-final-scaled versions - the *inputs*
+to this second pass were the pre-scale `normalized/` crops, not those files, so there's no
+compounded resize blur) and `gen_batman_410.py` re-run. `batman_410.c`: `MAIN_CY` changed from
+`CH/2` to the literal `262` (with the tick-measurement reasoning in a comment, since it's no longer
+derivable from a simple canvas-geometry macro); `HAND_{HOUR,MIN,SEC}_PIVOT_{X,Y}` updated to the
+newly-measured hub coordinates in the smaller sprites.
+
+**Subdial needles removed**: `sub_hand_l`/`sub_hand_r` creation in `init_face_batman_410()` and
+their rotation calls in `update_time_batman_410()` commented out (not deleted - same pattern as
+the already-commented gold cap circle from the previous entry), per "leave those alone for now" -
+the two subdial *faces* are raster, baked into `face_bg`, and untouched by this. The now-unused
+`sub_hand_l`/`sub_hand_r` static pointers and `HAND_SUB_BASE_DEG` macro are harmless dead code, not
+warned about by this build (no `-Wunused-variable`/`-Werror` in `platformio.ini`).
+
+`pio run -e lolin_s3_2_06` built clean (RAM 45.4%, Flash 84.3%, ~40KB smaller than the previous
+flash - smaller hand sprites), flashed via plain `pio run -t upload` over the usual `/dev/serial/
+by-id/...-if00` path.
+
+**Still not committed** - same reasoning as the previous entry, this is a second uncommitted pass
+on top of the first, waiting on the user's actual look at the physical watch before finalizing
+anything. If picking this up cold: check whether the user has since given feedback on *this* flash
+before assuming the previous entry's open questions (hub size vs cap, corner-fix threshold) are
+still the live ones - they may have been superseded by newer feedback not yet written down here.
