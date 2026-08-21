@@ -20,6 +20,17 @@ from PIL import Image
 # Unlike v4, these hand sprites carry a baked-in hub+tail with the pivot
 # point inside the image rather than at row 0, so batman_410.c's per-hand
 # pivot coordinates and HAND_BASE_DEG changed accordingly.
+#
+# v5.1 (2026-08-21): hand_min.png rescaled in place (24x138 -> 31x179, pivot
+# 12,125 -> 16,162) so the minute hand's pivot-to-tip length reaches the
+# measured 3-o'clock minute-tick radius (~162px, see batman_410.c HAND_MIN_
+# PIVOT_* comment) instead of undershooting it. Also added day_bg_patch.png
+# and sec_bg_patch.png: small crops of the real background with the baked
+# "FRI" day-window text and the baked "31" number above the bat symbol
+# removed (OpenCV inpaint over a hand-picked letter mask, done once outside
+# this script), used as opaque overlay windows so a live weekday label and a
+# live seconds counter can be drawn on top without disturbing the rest of
+# the art. See batman_410.c for the label placement.
 
 SRC_DIR = "/home/greg/chronos-watch/src/faces/batman_410/batman_v5_410x494"
 OUT_DIR = "/home/greg/chronos-watch/src/faces/batman_410/assets"
@@ -81,5 +92,14 @@ for fname, outname in [
 ]:
     img = Image.open(os.path.join(SRC_DIR, fname)).convert("RGBA")
     write_asset(outname, img, has_alpha=True)
+
+# ---- Window patches: opaque, straight passthrough, no scaling (already
+# native-resolution crops of the background, see v5.1 note above). ----
+for fname, outname in [
+    ("day_bg_patch.png", "face_batman_410_day_bg"),
+    ("sec_bg_patch.png", "face_batman_410_sec_bg"),
+]:
+    img = Image.open(os.path.join(SRC_DIR, fname)).convert("RGBA")
+    write_asset(outname, img, has_alpha=False)
 
 print("done")

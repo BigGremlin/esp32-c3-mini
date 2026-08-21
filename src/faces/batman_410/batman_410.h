@@ -32,6 +32,8 @@ extern "C"
     LV_IMG_DECLARE(face_batman_410_hand_minute);
     LV_IMG_DECLARE(face_batman_410_hand_second);
     LV_IMG_DECLARE(face_batman_410_hand_sub);
+    LV_IMG_DECLARE(face_batman_410_day_bg);
+    LV_IMG_DECLARE(face_batman_410_sec_bg);
 #endif
 
     void onFaceEvent(lv_event_t * e);

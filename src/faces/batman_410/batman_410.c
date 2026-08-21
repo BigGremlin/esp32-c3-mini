@@ -27,6 +27,20 @@
 // the pixel math and the HAND_BASE_DEG / HAND_*_PIVOT_* comments below for
 // how that changed the hand placement code. Sub-hand art (hand_sub) is still
 // the unchanged v4 asset - none was redelivered this round.
+//
+// v5.1 (2026-08-21): minute hand lengthened (see HAND_MIN_PIVOT_* below) and
+// two of the background's baked dummy readouts wired up to live data: the
+// top-left "FRI" day window now shows the real weekday, and the number
+// baked above the bat emblem (was a static "31") now shows live seconds as
+// an experiment. Both reuse the citizen_410 trick of an opaque patch image
+// (a crop of the same background with the old text erased via inpainting,
+// see day_bg_patch.png/sec_bg_patch.png and gen_batman_410.py's v5.1 note)
+// laid over the original art, with a plain (non-rotated) LVGL label on top -
+// unlike citizen_410's LCD windows the FRI pill is drawn at a diagonal tilt
+// in the art, which a straight label doesn't match, but matching that tilt
+// would need real text rotation for arbitrary-width day names, not
+// attempted here. Battery/date/weather windows elsewhere on this dial are
+// still static baked art, untouched.
 // Watchface: batman_410
 
 #include <math.h>
@@ -42,6 +56,10 @@ static lv_obj_t *min_hand    = NULL;
 static lv_obj_t *sec_hand    = NULL;
 static lv_obj_t *sub_hand_l  = NULL;  // left (blank) subdial, running-seconds sweep
 static lv_obj_t *sub_hand_r  = NULL;  // right (blank) subdial, slow hour-style counter
+static lv_obj_t *day_bg      = NULL;  // patched-blank copy of the top-left "FRI" pill
+static lv_obj_t *day_label   = NULL;  // live weekday text drawn on top of day_bg
+static lv_obj_t *sec_bg      = NULL;  // patched-blank copy of the number above the bat
+static lv_obj_t *sec_label   = NULL;  // live seconds text drawn on top of sec_bg
 
 // Canvas is already 410x494, the project's standard "content" size - see
 // header comment above.
@@ -91,10 +109,46 @@ static lv_obj_t *sub_hand_r  = NULL;  // right (blank) subdial, slow hour-style 
 // by the same factor to keep their original relative proportions.
 #define HAND_HOUR_PIVOT_X 20
 #define HAND_HOUR_PIVOT_Y 104
-#define HAND_MIN_PIVOT_X 12
-#define HAND_MIN_PIVOT_Y 125
+// Minute hand rescaled 2026-08-21 (24x138 -> 31x179 in the source asset) so
+// its pivot-to-tip length reaches the 3 o'clock minute-tick ring instead of
+// stopping well short of it. Target radius measured directly off this
+// background's pixels: the two minute ticks flanking the 3 o'clock position
+// (the exact 3 o'clock tick itself is hidden under the right subdial) have
+// their outer tips at (366,244) and (366,280), both radius 162.0px from
+// (MAIN_CX,MAIN_CY) - old pivot-to-tip was only 125px, noticeably short.
+// Scale factor 162/125 = 1.296 applied uniformly to the whole sprite so the
+// hand doesn't distort, pivot coordinates scaled by the same factor.
+#define HAND_MIN_PIVOT_X 16
+#define HAND_MIN_PIVOT_Y 162
 #define HAND_SEC_PIVOT_X 12
 #define HAND_SEC_PIVOT_Y 166
+
+// Day-of-week window: opaque day_bg patch is a straight crop of the
+// background at (DAY_BG_X,DAY_BG_Y), see gen_batman_410.py's v5.1 note for
+// how the baked "FRI" text was removed from it. day_label is a plain
+// (non-rotated) label centered over where that text used to sit - the pill
+// itself is drawn at a diagonal tilt in the art which the label doesn't
+// match, see the file header comment.
+#define DAY_BG_X 58
+#define DAY_BG_Y 46
+#define DAY_LABEL_X 73
+#define DAY_LABEL_Y 58
+#define DAY_LABEL_W 60
+#define DAY_LABEL_H 26
+
+// Seconds-experiment window: same technique, patched over the number that
+// used to sit statically above the bat emblem (was baked as "31").
+#define SEC_BG_X 180
+#define SEC_BG_Y 294
+#define SEC_LABEL_X 180
+#define SEC_LABEL_Y 296
+#define SEC_LABEL_W 55
+#define SEC_LABEL_H 30
+// Gold sampled directly off the original baked digit pixels (e.g. (215,310)
+// = 251,227,96), used so the live seconds text keeps the same look.
+#define SEC_TEXT_COLOR 0xFBE360
+
+static const char *const DAY_NAMES[7] = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
 
 static int32_t norm_angle_deci(float deg)
 {
@@ -175,6 +229,38 @@ void init_face_batman_410(void (*callback)(const char*, const lv_img_dsc_t *, lv
     // lv_image_set_pivot(sub_hand_r, 6, 0);
     // lv_obj_remove_flag(sub_hand_r, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* ---- Day-of-week window: blanked pill patch + live weekday label. ---- */
+    day_bg = lv_image_create(face_batman_410);
+    lv_image_set_src(day_bg, &face_batman_410_day_bg);
+    lv_obj_set_pos(day_bg, DAY_BG_X, DAY_BG_Y);
+    lv_obj_remove_flag(day_bg, LV_OBJ_FLAG_SCROLLABLE);
+
+    day_label = lv_label_create(face_batman_410);
+    lv_obj_set_style_text_font(day_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(day_label, lv_color_white(), 0);
+    lv_obj_set_style_text_align(day_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_opa(day_label, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(day_label, 0, 0);
+    lv_label_set_text(day_label, "FRI");
+    lv_obj_set_pos(day_label, DAY_LABEL_X, DAY_LABEL_Y);
+    lv_obj_set_size(day_label, DAY_LABEL_W, DAY_LABEL_H);
+
+    /* ---- Seconds-experiment window: blanked patch + live seconds label. ---- */
+    sec_bg = lv_image_create(face_batman_410);
+    lv_image_set_src(sec_bg, &face_batman_410_sec_bg);
+    lv_obj_set_pos(sec_bg, SEC_BG_X, SEC_BG_Y);
+    lv_obj_remove_flag(sec_bg, LV_OBJ_FLAG_SCROLLABLE);
+
+    sec_label = lv_label_create(face_batman_410);
+    lv_obj_set_style_text_font(sec_label, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(sec_label, lv_color_hex(SEC_TEXT_COLOR), 0);
+    lv_obj_set_style_text_align(sec_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_opa(sec_label, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(sec_label, 0, 0);
+    lv_label_set_text(sec_label, "00");
+    lv_obj_set_pos(sec_label, SEC_LABEL_X, SEC_LABEL_Y);
+    lv_obj_set_size(sec_label, SEC_LABEL_W, SEC_LABEL_H);
+
     callback("Batman", &face_batman_410_dial_img_preview, &face_batman_410, &sec_hand);
 
 #endif
@@ -187,6 +273,9 @@ void update_time_batman_410(int second, int minute, int hour, bool mode, bool am
     {
         return;
     }
+
+    lv_label_set_text(day_label, DAY_NAMES[weekday % 7]);
+    lv_label_set_text_fmt(sec_label, "%02d", second);
 
     float hour_angle = (hour % 12) * 30.0f + minute * 0.5f;
     float min_angle  = minute * 6.0f;
