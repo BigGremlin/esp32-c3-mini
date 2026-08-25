@@ -148,7 +148,26 @@ bool hasUpdatedSec = false;
 bool navSwitch = false;
 bool extremePowerSave = false;
 #if ESPS3_2_06
-bool on_battery() { return !PMU.isVbusIn(); }
+// Cached the same way as the 30s battery-percent poll further down (and for
+// the same reason): staying_on_for_charging() calls this on every single
+// hal_loop() iteration, unthrottled. That's fine normally, but when the
+// AXP2101 is in its known flaky/stuck-register state (see DEVELOPER_NOTES.txt),
+// each PMU.isVbusIn() I2C round-trip can take close to a second even with
+// Wire's timeout guard, which throttled the whole loop - including
+// btn_home.loop() - down to ~1Hz and caused misclassified/missed button
+// presses. Re-checking VBUS once a second instead of every tick avoids that
+// without meaningfully delaying charge-state changes.
+bool on_battery()
+{
+  static unsigned long lastVbusCheck = 0;
+  static bool cachedOnBattery = true;
+  if (millis() - lastVbusCheck >= 1000)
+  {
+    lastVbusCheck = millis();
+    cachedOnBattery = !PMU.isVbusIn();
+  }
+  return cachedOnBattery;
+}
 #endif
 bool touchAsleep = false; // step 4: tracks whether tft.touch.sleep() was called, so
                           // screen_on() only pays TouchDrvFT6X36::wakeup()'s ~200ms
@@ -424,6 +443,18 @@ void deep_idle_loop()
   }
   Timber.i("deep_idle_loop: exited after %d iterations", iterations);
   Serial.flush();
+
+  // Re-sync the internal clock from the external PCF85063 (accurate,
+  // crystal-based) rather than trusting it after however many hundreds of
+  // 200ms esp_light_sleep_start() cycles this loop just did - those each
+  // rely on the SoC's own internal RTC_SLOW_CLK calibration (imprecise RC
+  // oscillator, no external 32kHz crystal wired to it on this board) to
+  // account for the sleep duration, and small per-cycle errors compound
+  // over an extended on-battery/disconnected idle stretch. Only ever read
+  // once before, at boot (see hal_setup()) - this is the first re-sync.
+  RTC_DateTime dt = rtc.getDateTime();
+  watch.setTime(dt.getSecond(), dt.getMinute(), dt.getHour(), dt.getDay(), dt.getMonth(), dt.getYear());
+  Timber.i("deep_idle_loop: resynced clock from PCF85063 (%02d:%02d:%02d)", dt.getHour(), dt.getMinute(), dt.getSecond());
 }
 #endif
 
@@ -2310,6 +2341,16 @@ void hal_setup()
 #endif
 
 #if ESPS3_2_06
+  // Guard against the AXP2101's known recurring stuck-register state (only
+  // otherwise clearable by a physical battery disconnect - see
+  // DEVELOPER_NOTES.txt) wedging the whole main loop. Without an explicit
+  // timeout here, a stuck I2C transaction on this shared touch/RTC/PMU bus
+  // can block indefinitely inside hal_loop()'s 30s battery poll, freezing
+  // lv_timer_handler()/watch.loop()/btn_home.loop() along with it - i.e. the
+  // button going totally unresponsive. This makes a stuck read fail fast
+  // (skip that one reading, per pct>=0 checks below) instead of hanging.
+  Wire.setTimeOut(50);
+
   if (!rtc.begin(Wire))
 	{
 		Timber.e("Failed to find PCF85063 - check your wiring!");
