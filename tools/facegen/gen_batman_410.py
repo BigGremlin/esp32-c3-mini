@@ -31,6 +31,16 @@ from PIL import Image
 # this script), used as opaque overlay windows so a live weekday label and a
 # live seconds counter can be drawn on top without disturbing the rest of
 # the art. See batman_410.c for the label placement.
+#
+# v5.2 (2026-08-21, same day): four more baked readouts patched the same way
+# - time_bg_patch.png ("14:37" -> live HH:MM), batt_bg_patch.png ("78%" ->
+# live battery), weather_bg_patch.png ("22°C" -> live temperature, the sun
+# icon itself left as static art - no icon-code convention exists anywhere
+# else in this codebase to drive a real icon swap from, see batman_410.c),
+# date_bg_patch.png ("31" -> live day-of-month). The weather and date masks
+# use a yellow-excluding threshold (keep only near-neutral bright pixels,
+# not gold ones) since the sun icon and the bat's wingtip sit close enough
+# to those two crops that a plain brightness threshold would eat into them.
 
 SRC_DIR = "/home/greg/chronos-watch/src/faces/batman_410/batman_v5_410x494"
 OUT_DIR = "/home/greg/chronos-watch/src/faces/batman_410/assets"
@@ -98,6 +108,10 @@ for fname, outname in [
 for fname, outname in [
     ("day_bg_patch.png", "face_batman_410_day_bg"),
     ("sec_bg_patch.png", "face_batman_410_sec_bg"),
+    ("time_bg_patch.png", "face_batman_410_time_bg"),
+    ("batt_bg_patch.png", "face_batman_410_batt_bg"),
+    ("weather_bg_patch.png", "face_batman_410_weather_bg"),
+    ("date_bg_patch.png", "face_batman_410_date_bg"),
 ]:
     img = Image.open(os.path.join(SRC_DIR, fname)).convert("RGBA")
     write_asset(outname, img, has_alpha=False)

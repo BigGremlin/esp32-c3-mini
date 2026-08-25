@@ -34,6 +34,22 @@ extern "C"
     LV_IMG_DECLARE(face_batman_410_hand_sub);
     LV_IMG_DECLARE(face_batman_410_day_bg);
     LV_IMG_DECLARE(face_batman_410_sec_bg);
+    LV_IMG_DECLARE(face_batman_410_time_bg);
+    LV_IMG_DECLARE(face_batman_410_batt_bg);
+    LV_IMG_DECLARE(face_batman_410_weather_bg);
+    LV_IMG_DECLARE(face_batman_410_date_bg);
+    LV_IMG_DECLARE(face_batman_410_sun_bg);
+    LV_IMG_DECLARE(face_batman_410_weather_icon_0);
+    LV_IMG_DECLARE(face_batman_410_weather_icon_1);
+    LV_IMG_DECLARE(face_batman_410_weather_icon_2);
+    LV_IMG_DECLARE(face_batman_410_weather_icon_3);
+    LV_IMG_DECLARE(face_batman_410_weather_icon_4);
+    LV_IMG_DECLARE(face_batman_410_weather_icon_5);
+    LV_IMG_DECLARE(face_batman_410_weather_icon_6);
+    LV_IMG_DECLARE(face_batman_410_weather_icon_7);
+
+    LV_FONT_DECLARE(montserrat_semibold_22);
+    LV_FONT_DECLARE(montserrat_semibold_26);
 #endif
 
     void onFaceEvent(lv_event_t * e);

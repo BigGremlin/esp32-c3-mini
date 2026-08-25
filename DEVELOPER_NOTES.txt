@@ -2576,3 +2576,140 @@ on top of the first, waiting on the user's actual look at the physical watch bef
 anything. If picking this up cold: check whether the user has since given feedback on *this* flash
 before assuming the previous entry's open questions (hub size vs cap, corner-fix threshold) are
 still the live ones - they may have been superseded by newer feedback not yet written down here.
+
+------------------------------------------------------------------------------------------------
+2026-08-21 - batman_410: v5 rebuild finally committed, minute-hand length fix, six baked readouts
+wired to live data, z-order fix - flashed 3x today, PAUSED for user feedback overnight
+------------------------------------------------------------------------------------------------
+**Committed the backlog first**: the two entries above (2026-08-20 v5 rebuild + same-day hand-
+rescale/subdial-removal pass) had been sitting uncommitted this whole time, including
+`batman_v5_410x494/` never once being `git add`ed. Split into two commits so history reads
+cleanly: `a301853` (the v5 rebuild - wider bg, hub-and-tail hands) and `9b72cbc` (the minute-hand
+length fix below + first cut of the day/seconds windows, still flat/non-rotated at that point).
+Note: `a301853`'s `hand_min.png` is an approximate reconstruction (downscaled back down from the
+post-length-fix asset), not the true original bytes - the real original had already been
+overwritten in place by the time this got split into commits. Visually identical, not bit-identical.
+
+**Minute hand lengthened**: user reported it looked short. Measured the real 3-o'clock tick radius
+directly off background pixels - 162px from `(MAIN_CX,MAIN_CY)`, using the two ticks that flank
+the exact 3-o'clock position (that one tick is hidden under the right subdial). Old pivot-to-tip
+was 125px. Rescaled `hand_min.png` by 162/125 = 1.296 (both dimensions, so no distortion), pivot
+coordinates scaled the same way. This landed in `9b72cbc`.
+
+**Day-of-week + seconds-experiment windows, first cut** (also in `9b72cbc`): reused citizen_410's
+LCD-window trick - OpenCV-inpaint the baked text out of a small crop of the real background
+(hand-picked letter mask per window, careful to dodge nearby ticks/bat-wing pixels), overlay that
+opaque patch, draw a live LVGL label on top. Top-left "FRI" pill -> real weekday. The number baked
+above the bat emblem (was static "31") -> live seconds, explicitly framed to the user as an
+experiment, not a settled design choice - not clear yet if that's the best use of that spot.
+
+**Day label rotation** (uncommitted at time of writing): user hardware-tested and reported the day
+label "definitely needs to be rotated to match the window" - the FRI pill is drawn at a diagonal
+tilt in the art, the first-cut label was flat. Measured the tilt directly off the original baked
+"FRI" glyphs (bottom-left corner of "F" at (73,88) to top-right corner of "I" at (133,58),
+atan2(-30,60) = -26.57 deg) and applied via `lv_obj_set_style_transform_rotation` + a center pivot
+(`DAY_LABEL_ROTATION`). LVGL 9.3's transform system handles rotated label text fine (renders
+through an offscreen layer). Flashed, not yet confirmed correct by the user.
+
+**Z-order bug + four more windows wired up** (uncommitted): user reported the seconds text was
+drawing *on top of* the analog hands - all six window bg-patch+label pairs were being created
+*after* the hands in `init_face_batman_410()`, so LVGL's creation-order z-stacking put them above
+the hands everywhere, not just where a hand could physically reach. Fixed by moving the whole
+block (day/sec/time/batt/weather/date) to before hand creation. Only sec/time/date are within any
+hand's sweep radius (day/batt sit past 200px out, hands max out around 166px), but moved all six
+together for consistency/simplicity rather than special-casing.
+
+Same pass, four more baked readouts wired to live data using the identical inpaint-patch+label
+technique (measurements taken by cropping+gridding the background PNG at increasing zoom until
+letter-pixel bounding boxes were nailed down, same as the day/seconds windows):
+- Bottom-center "14:37" -> live `HH:MM` (`time_label`, no am/pm handling - original art is 24h
+  style and no other face in this codebase has an established digital-clock convention to match).
+- Top-right "78%" pill -> live battery (`batt_label`), rotated the *other* way from the day pill
+  (measured off the original "78%" glyphs: atan2(36,42) = +40.6 deg, `BATT_LABEL_ROTATION`) -
+  this pill's art leans the opposite direction, not a copy-paste of the day pill's angle.
+- Black box between the 4 and 5 numerals (closer to dial center than either), was baked "31" ->
+  live day-of-month (`date_label`), flat, no rotation - that box isn't tilted in the art.
+- "22°C" next to the sun icon -> live temperature (`weather_label`). The sun icon itself is left
+  as static baked art - `update_weather_batman_410`'s `icon` int has no meaning defined anywhere in
+  this codebase (grepped every face's `update_weather_*`, all stubs; ChronosESP32.h itself has no
+  weather-icon enum either), so there's nothing to map it to without inventing an icon convention
+  from scratch. Flagged to the user rather than silently deciding to build one.
+
+Weather and date-of-month inpaint masks needed a yellow-excluding brightness threshold (keep only
+near-neutral bright pixels, reject gold ones) rather than a plain brightness cutoff - the sun icon
+sits close to the "22°C" text and the bat's wingtip clips into the date box's crop rectangle, and a
+plain threshold was erasing bits of both on the first attempt (caught by an inpaint-mask preview
+render before touching the real firmware, not on hardware).
+
+`pio run -e lolin_s3_2_06` built clean after each of today's three flashes (final: RAM 45.4%,
+Flash 84.8%, used 8067328/9437184 bytes). All three uploads went over `/dev/serial/by-id/
+usb-Espressif_USB_JTAG_serial_debug_unit_80:B5:4E:F3:30:F4-if00` via plain `pio run -t upload`;
+the *first* upload attempt of the day failed twice in a row with esptool's "No serial data
+received" right after the baud-rate change, fixed by the user physically replugging the USB
+cable (consistent failure both times, not a one-off - worth trying a replug early if this
+recurs, before deeper debugging).
+
+**Session paused here for user feedback overnight - NOT committed.** Working tree has
+`batman_410.c`/`.h`, four new `assets/face_batman_410_{time,batt,weather,date}_bg.c`, the four new
+`*_bg_patch.png` files in `batman_v5_410x494/`, and `gen_batman_410.py`'s v5.2 additions, all
+uncommitted on top of the `a301853`/`9b72cbc` commits above. Specific things the user still needs
+to confirm on the real screen before this is considered done:
+- Day label rotation (just flashed, not yet confirmed - see above)
+- Battery pill rotation direction (+40.6 deg, opposite the day pill - never confirmed on hardware)
+- Day-of-month window position/size (user asked for it "between 4 and 5, closer to center" -
+  placed at `DATE_BG_X/Y=262,336`, not yet confirmed that reads right on the real screen)
+- Whether the seconds-above-the-bat experiment is worth keeping at all, vs. using that spot for
+  something else
+- Weather icon: still static, open question above about whether to build a real icon-swap system
+If picking this up cold: read the user's next message for feedback before assuming any of the
+five points above are resolved - none of them have hardware confirmation yet.
+
+------------------------------------------------------------------------------------------------
+2026-08-21 (same day, session 2) - batman_410: weather icon resolved, fonts upgraded to semibold,
+three rounds of hardware-tuned pixel/degree nudges - flashed 4x, still uncommitted going in
+------------------------------------------------------------------------------------------------
+**Weather icon resolved.** User pointed at three other faces (`2151_410`, `1167_410`,
+`red_magic_410`) as already having real icon-swap sets and said to steal one. Decoded all three
+faces' baked `lv_img_dsc_t` assets back to PNG with `tools/facegen/lvgl_img.py`'s existing
+`decode_to_rgba` to compare palettes - picked `red_magic_410`'s grayscale/silver set (2151's icons
+sit on brown chip backgrounds, 1167's are blue/orange) as the best match for this dial's black-
+and-gold look. Re-encoded 8 of its 9 icons (index 8 is dead code even in red_magic - `icon % 8`
+never selects it) as new `face_batman_410_weather_icon_0..7` assets, each padded to a fixed 26x26
+canvas so swapping the live `lv_img_dsc_t` src never shifts the object's on-screen position (LVGL
+positions by top-left, not centroid, and the source icons weren't uniformly sized). The static
+baked sun icon was patched out with a new `face_batman_410_sun_bg` opaque patch (tiled from a
+verified-clean nearby black-texture sample, not an inpaint) at its measured bbox
+(252,447)-(276,470) plus margin. `update_weather_batman_410()` now does
+`lv_image_set_src(weather_icon, WEATHER_ICONS[icon % 8])` - same indexing already proven live on
+the other three faces, so no new guessing about what the phone app's icon codes mean.
+
+**Fonts.** All six live readouts (day/sec/time/batt/weather/date) bumped a size (20->22, 24->26)
+and switched off LVGL's stock Montserrat (regular weight only, no bold compiled in anywhere in
+this project) to a custom semibold instance: downloaded Google's variable Montserrat TTF,
+instanced to weight 600 via `fonttools varLib.instancer`, baked to LVGL format with `lv_font_conv`
+(same tool that made citizen_410's `dseg14_bold_18`), covering just the glyphs these labels need
+(digits, uppercase, `% - . : °`). New files: `montserrat_semibold_22.c`/`_26.c`.
+
+**Three rounds of live hardware-feedback tuning**, each specified in exact pixels/degrees by the
+user against the real screen and applied without re-litigating the pixel math. Round 1: day/battery
+pill rotations set to a symmetric +/-27.0deg (was individually-measured -26.6/+40.6), day label
+nudged 1px toward dial center, temperature tilted -20deg and nudged toward the "23rd tick mark"
+(tick 23 = 138deg from 12, radius 162 from (MAIN_CX,MAIN_CY)). Rounds 2-3 repeated the same shape:
+day pill rotation pushed further negative (-28deg, round 2 only), day+battery labels moved 2px
+further toward dial center each round, digital-time and day-of-month labels moved down 2px each
+round (their `_bg` patches deliberately left in place - they blank the *original* baked digits at
+a fixed art location and must stay there regardless of where the live label draws), temperature
+label (and now the weather icon, "can follow it") moved another (+6,+1) each round with rotation
+going -20->-21->-22deg. All these live as `#define`s near the top of `batman_410.c` with inline
+per-round comments explaining the exact vector math - read those before changing again rather than
+re-deriving from scratch.
+
+**Flash discipline this session:** user said "flash it" fresh each round rather than it carrying
+forward - built+flashed 4 times total (icon/font/round-1 batch, then once each for rounds 2 and 3),
+all via `pio run -e lolin_s3_2_06 -t upload`. (Superseded 2026-08-25: user has since said to just
+flash automatically after every new build going forward, no more asking each round - see
+`feedback_chronos_autoflash` in Claude's memory if picking this up via Claude.)
+
+**State going into the 2026-08-25 session:** everything above was still uncommitted - this entry
+itself was written retroactively, alongside the commit, rather than same-day. Check git log for
+the actual commit this landed in rather than assuming it's still pending.
