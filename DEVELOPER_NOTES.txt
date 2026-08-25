@@ -2713,3 +2713,46 @@ flash automatically after every new build going forward, no more asking each rou
 **State going into the 2026-08-25 session:** everything above was still uncommitted - this entry
 itself was written retroactively, alongside the commit, rather than same-day. Check git log for
 the actual commit this landed in rather than assuming it's still pending.
+
+------------------------------------------------------------------------------------------------
+2026-08-25 - Button unresponsive after ~10s while awake - FIXED, flashed, confirmed, committed
+------------------------------------------------------------------------------------------------
+User-reported symptom: screen stays lit, but the home button stops responding roughly 10-15s
+after wake/interaction, recovering after about a minute; single presses were also occasionally
+misread as long-presses (jumping into the watchface picker unprompted).
+
+Live serial capture (pyserial, `/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_*`,
+115200) showed continuous `Wire.cpp:513 i2cRead Error -1` firing roughly once per second, present
+the entire capture regardless of whether the button was currently responsive - ruling out the
+first theory (AXP2101 stuck-register state, normally cleared by a physical battery disconnect per
+earlier entries in this file). A battery pull was tried anyway as a sanity check; errors resumed
+immediately on reconnect, confirming this run was a different mechanism than the earlier
+stuck-register cases, or that the disconnect alone isn't sufficient this time.
+
+Root cause found by reading, not just logging: `staying_on_for_charging()` (called from
+`hal_loop()` every single iteration whenever the screen is on, no throttling) calls `on_battery()`
+-> `PMU.isVbusIn()`, a real I2C round-trip. Every other I2C touch point in this file is
+deliberately rate-limited (the 30s battery-percent poll a few lines below it; the 200ms
+timer-poll in `deep_idle_loop()` from the 2026-07-20/21 Extreme Power Save work above) - this one
+wasn't. With the AXP2101 in a flaky state, each call was taking close to a second even through the
+`Wire.setTimeOut(50)` guard (added earlier this same session, see below) - which throttled the
+*entire* `hal_loop()`, including `btn_home.loop()`, down to ~1Hz. Button2's click-duration timing
+depends on being polled regularly; sampled at ~1Hz it both missed presses landing between samples
+and misjudged hold duration on the ones it caught, matching both reported symptoms exactly.
+
+Fix: `on_battery()` now caches the VBUS read for 1s (same cache-and-reuse pattern as the existing
+30s poll) instead of hitting I2C on every tick. **Confirmed fixed on-device by the user, both on
+USB power and on battery.**
+
+Also landed in the same commit (both already sitting uncommitted in the working tree at the start
+of this session):
+- `Wire.setTimeOut(50)`, added in `hal_setup()` right before first I2C use. Makes a stuck
+  transaction on the shared touch/RTC/PMU bus fail fast instead of blocking indefinitely - doesn't
+  fix the root cause above on its own (the loop was still getting throttled to ~1Hz through it),
+  but is worth keeping as a backstop against a true indefinite hang.
+- `deep_idle_loop()` now re-syncs the clock from the external PCF85063 after an extended
+  light-sleep idle stretch, instead of trusting the SoC's internal RTC_SLOW_CLK calibration
+  (imprecise RC oscillator, no external crystal wired to it) across however many 200ms cycles it
+  just did. User: "initially looking good", not yet soak-tested for a full day.
+
+Committed together as `19a3c3b` on `gremlinDev`.
