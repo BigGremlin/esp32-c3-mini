@@ -269,7 +269,7 @@ void addQrList(uint8_t id, const char *link);
 void setWeatherIcon(lv_obj_t *obj, int id, bool day);
 void setNotificationIcon(lv_obj_t *obj, int appId);
 void ui_update_watchfaces(int second, int minute, int hour, bool mode, bool am, int day, int month, int year, int weekday,
-                          int temp, int icon, int battery, bool connection, int steps, int distance, int kcal, int bpm, int oxygen);
+                          int temp, int icon, int battery, bool connection, bool plugged, bool charging, int steps, int distance, int kcal, int bpm, int oxygen);
 void addListDrive(const char *name, int total, int used, lv_event_cb_t event_cb);
 void addListDir(const char *name);
 void addListFile(const char *name, int size);
@@ -4279,7 +4279,7 @@ void ui_watchfaces_init(void)
 }
 
 void ui_update_watchfaces(int second, int minute, int hour, bool mode, bool am, int day, int month, int year, int weekday,
-                          int temp, int icon, int battery, bool connection, int steps, int distance, int kcal, int bpm, int oxygen)
+                          int temp, int icon, int battery, bool connection, bool plugged, bool charging, int steps, int distance, int kcal, int bpm, int oxygen)
 {
 
       update_check_elecrow(ui_home, second, minute, hour, mode, am, day, month, year, weekday, temp, icon, battery, connection, steps, distance, kcal, bpm, oxygen);
@@ -4329,7 +4329,7 @@ void ui_update_watchfaces(int second, int minute, int hour, bool mode, bool am, 
       update_check_2051_410(ui_home, second, minute, hour, mode, am, day, month, year, weekday, temp, icon, battery, connection, steps, distance, kcal, bpm, oxygen);
       update_check_2151_410(ui_home, second, minute, hour, mode, am, day, month, year, weekday, temp, icon, battery, connection, steps, distance, kcal, bpm, oxygen);
       update_check_75_2_410(ui_home, second, minute, hour, mode, am, day, month, year, weekday, temp, icon, battery, connection, steps, distance, kcal, bpm, oxygen);
-      update_check_classic_410(ui_home, second, minute, hour, mode, am, day, month, year, weekday, temp, icon, battery, connection, steps, distance, kcal, bpm, oxygen);
+      update_check_classic_410(ui_home, second, minute, hour, mode, am, day, month, year, weekday, temp, icon, battery, connection, plugged, charging, steps, distance, kcal, bpm, oxygen);
       update_check_red_magic_410(ui_home, second, minute, hour, mode, am, day, month, year, weekday, temp, icon, battery, connection, steps, distance, kcal, bpm, oxygen);
       update_check_citizen_410(ui_home, second, minute, hour, mode, am, day, month, year, weekday, temp, icon, battery, connection, steps, distance, kcal, bpm, oxygen);
       update_check_batman_410(ui_home, second, minute, hour, mode, am, day, month, year, weekday, temp, icon, battery, connection, steps, distance, kcal, bpm, oxygen);

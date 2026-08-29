@@ -168,6 +168,22 @@ bool on_battery()
   }
   return cachedOnBattery;
 }
+
+// Same 1s-cached pattern as on_battery() just above, kept as an independent PMU read (not
+// derived from on_battery()'s own cache) so callers of either don't have to care which one
+// ran most recently - used by the classic_410 face's charge indicator to tell "plugged in,
+// topped up" apart from "plugged in, actively charging".
+bool is_charging()
+{
+  static unsigned long lastChargeCheck = 0;
+  static bool cachedCharging = false;
+  if (millis() - lastChargeCheck >= 1000)
+  {
+    lastChargeCheck = millis();
+    cachedCharging = PMU.isCharging();
+  }
+  return cachedCharging;
+}
 #endif
 bool touchAsleep = false; // step 4: tracks whether tft.touch.sleep() was called, so
                           // screen_on() only pays TouchDrvFT6X36::wakeup()'s ~200ms
@@ -2738,8 +2754,12 @@ void update_faces()
 
 #if ESPS3_2_06
   int battery = watchBatteryPercent;
+  bool plugged = !on_battery();
+  bool charging = is_charging();
 #else
   int battery = watch.getPhoneBattery();
+  bool plugged = false;
+  bool charging = false;
 #endif
   bool connection = watch.isConnected();
 
@@ -2757,7 +2777,7 @@ void update_faces()
   {
 
     ui_update_watchfaces(second, minute, hour, mode, am, day, month, year, weekday,
-                         temp, icon, battery, connection, steps, distance, kcal, bpm, oxygen);
+                         temp, icon, battery, connection, plugged, charging, steps, distance, kcal, bpm, oxygen);
   }
 }
 

@@ -2756,3 +2756,73 @@ of this session):
   just did. User: "initially looking good", not yet soak-tested for a full day.
 
 Committed together as `19a3c3b` on `gremlinDev`.
+
+------------------------------------------------------------------------------------------------
+2026-08-29 - classic_410: charge window added, cogs/date windows repositioned, hand
+transparency/thickness reworked - flashed 8x with live hardware feedback each round, committed
+------------------------------------------------------------------------------------------------
+All changes this entry are in `classic_410.c/.h` unless noted, done via Claude Code, each round
+built+flashed (`pio run -e lolin_s3_2_06 -t upload --upload-port /dev/ttyACM0`) and corrected
+against the real screen - several of the pixel-position choices below turned out wrong on
+hardware and needed a second or third pass, since label/glyph geometry can't be checked from the
+source alone (see the charge-window paragraph). Read the inline comments at each `#define`/call
+site for the exact numbers; this is the narrative summary.
+
+**Date/day window** (`date_box`): moved down by half its own height (44/2=22px, so its
+`SCREEN_CY+55-22` offset became `SCREEN_CY+55`), then had its width brought in from 136 to 120px
+(kept centred) - both explicit, isolated requests, neither affects the numeral-gap math below
+since that only depends on the box's top/bottom edges.
+
+**New charge window**, near the "3" numeral: a red-bordered black box showing battery percentage
+as text plus a power-state indicator - a small circle (hollow ring = on battery, filled = plugged
+in but not charging/topped up) or, when actively charging, a yellow zigzag "bolt" line instead of
+the circle (`charge_dot`/`charge_bolt`, never shown together). No LVGL build in this project
+carries `LV_SYMBOL_USB/CHARGE/BATTERY_*` glyphs (checked the actual compiled
+`lv_font_montserrat_*.c` files - only a small hand-picked symbol subset is baked into each size),
+so these are hand-drawn primitives, matching this file's own "no new raster assets" convention
+rather than a font glyph or PNG. The indicator sits to the *left* of the percentage text (swapped
+partway through the session from an initial right-side placement, per request).
+
+*Positioning saga, worth remembering if this box moves again:* the user wanted this window's gap
+to the "3" numeral to match the date window's own (approved) gap to "7"/"5", derived as
+G=2.84 canvas px from the date box's known edges and the numerals' label-box geometry (see that
+derivation in `date_box`'s own comment block). Applying the same box-edge math to the charge
+window's radius offset (55->64) undershot on hardware (gap still bigger than G) - because the "3"
+numeral's 60px-wide label box is sized to fit *two*-digit numerals ("10"/"11"/"12"), so a single
+digit's real glyph ink sits well inside that box edge, not at it. A second attempt guessed a 10px
+glyph half-width and moved further (64->84) - this overshot the other way (gap smaller than G).
+Since exact glyph metrics aren't measurable from source, the two tries were used to bracket the
+answer rather than guessing a third: settled on radius 74 (splitting 64/84). **Not been explicitly
+re-confirmed as exactly right by the user** - if this is revisited, that's the open thread, not a
+finished fact.
+
+**Cogs window**: the bottom (inner) arc was raised by 1/3 of its 46px gap to the top (outer) arc
+per request - `COG_INNER_R` 55->70, `COG_OUTER_R` (101) untouched; since `mech_win`'s height and
+the gear cluster's recentring are both derived from `(COG_OUTER_R-COG_INNER_R)` with the top edge
+pinned, this alone also moved the gear mechanism up in step, no separate offset needed. A
+follow-up attempt shifted *both* arcs outward together (to 118/87, same width) to bring this
+window's own numeral gap (to "11"/"12"/"1") in line with the same G target used for the charge
+window - this was explicitly reverted back to 101/70 right after the user saw it on hardware, so
+the cogs window is *not* on the shared numeral-gap standard the other two windows are.
+
+**Hands**: `hour_hand`/`min_hand` and their red centre stripes (`hour_stripe`/`min_stripe`) all
+given `HAND_OPA`=191 (~75% opacity, i.e. "75% visibility"), each stripe backed by a new 1px
+fully-opaque "core" line (`hour_stripe_core`/`min_stripe_core`, same points every tick, drawn
+right on top) so a thin solid line still shows through the middle of each now-translucent stripe.
+The second hand and the stripes/cores themselves stay fully opaque - only the two main hand
+bodies and the stripes-as-a-whole got the transparency treatment.
+Separately, hour and minute hand *sizing* went through a mix-up worth noting: a request to
+shorten+thicken one hand was first applied to the minute hand, then corrected - it was meant for
+the hour hand. Net result: `hour_hand` length 85->64 (75% of original, tail unchanged) and width
+7->11 (two +2px passes, one originally landed on the minute hand and was moved over, one added on
+top); `min_hand` kept its original 130 length but ended up 2px wider than its own original (4->6)
+as a standing, separate request once the mix-up was sorted out.
+
+**New plumbing** (`app_hal.cpp`, `ui.c`/`ui.h`): added `is_charging()`, a 1s-cached
+`PMU.isCharging()` read using the same cache-and-reuse pattern as the existing `on_battery()`
+(itself now also read here via `!on_battery()` for "plugged"). `bool plugged, bool charging` were
+threaded through `ui_update_watchfaces()` -> `update_check_classic_410()` only - the other ~40
+faces' `update_check_*` calls are untouched, so this doesn't touch any other watchface's ABI.
+
+State going into this entry: all of the above was uncommitted in the working tree; this entry was
+written and committed together with the code in the same pass.

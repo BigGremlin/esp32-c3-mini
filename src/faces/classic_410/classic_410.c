@@ -23,8 +23,25 @@ static lv_obj_t *min_hand    = NULL;
 static lv_obj_t *sec_hand    = NULL;
 static lv_obj_t *hour_stripe = NULL;
 static lv_obj_t *min_stripe  = NULL;
+// 1px fully-opaque line drawn on top of each (now translucent, see HAND_OPA) centre stripe,
+// same points every update - the "opaque core inside a transparent stripe" requested.
+static lv_obj_t *hour_stripe_core = NULL;
+static lv_obj_t *min_stripe_core  = NULL;
 static lv_obj_t *date_box    = NULL;
 static lv_obj_t *date_label  = NULL;
+
+// Charge window - near the "3" numeral. charge_dot and charge_bolt are alternate power-state
+// indicators (never shown together, see update_status_classic_410): a small circle, hollow
+// when on battery / filled when plugged in but not charging, or a lightning bolt in place of
+// it when actively charging.
+static lv_obj_t *charge_box   = NULL;
+static lv_obj_t *charge_label = NULL;
+static lv_obj_t *charge_dot   = NULL;
+static lv_obj_t *charge_bolt  = NULL;
+static lv_point_precise_t bolt_pts[4];
+
+// 75% visibility on the main (hour/minute) hands, requested explicitly - 0.75*255 rounded.
+#define HAND_OPA 191
 
 // Mechanical "cogs" window at 12 o'clock, ported from the original RetroPie
 // LVGL-sim prototype (/home/pi/lv_port_linux/src/watch_face.c on the
@@ -52,8 +69,17 @@ static lv_timer_t *gear_timer = NULL;
 // 7.3% of that same original 64px measurement (not the narrowed one) once the heavier
 // clipping on the gears themselves was confirmed to look good: 95.6+4.672=100.27,
 // 60.4-4.672=55.73, rounded to 101/55 (net of both passes: outer 110->101, inner 46->55).
+// 2026-08-29: bottom (inner) arc raised by 1/3 of the 46px gap it had with the top (outer)
+// arc: 55 + 46/3 = 70.33 -> 70, outer arc left untouched. mech_win/MECH_H below are derived
+// from (COG_OUTER_R - COG_INNER_R) with the top edge pinned at COG_OUTER_R, so this alone
+// also pulls the gear cluster's own recentred position up by the same construction - no
+// separate offset needed to "move the mechanism" in step with the window.
+// 2026-08-29 (cont.): briefly shifted both arcs outward together by +17 (to 118/87) to bring
+// this window's own gap to its nearest numerals (11/12/1) in line with the date window's - put
+// back to 101/70 per explicit request right after seeing it on hardware; the numeral-gap
+// normalization only applies to the charge window now (see its own comment below).
 #define COG_OUTER_R 101
-#define COG_INNER_R 55
+#define COG_INNER_R 70
 #define COG_HALF_ANGLE_DEG 30.0f
 // First attempt at the "top arc looks thin/messy" clipping bug added an *outward* margin
 // to the mask's own bounds so it wouldn't eat the border's stroke - wrong fix, confirmed
@@ -294,10 +320,23 @@ void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_clear_flag(dial_canvas, LV_OBJ_FLAG_HIDDEN);
 
     /* ---- Date window - between the dial centre and the "6" numeral. Radius offset 55 is
-       halfway between the previous pass's 40 and the pass before that's 71. ---- */
+       halfway between the previous pass's 40 and the pass before that's 71.
+       2026-08-29: shifted down by half its own height (44/2=22, so 55-22 -> 55) per
+       explicit request.
+       2026-08-29 (cont.): this box's own closest-numeral gap - its bottom edge (canvas y
+       55+44=99 from centre) to numerals "7"/"5" (radius 143, 30deg either side of straight
+       down, label half-height 22: near edge at 143*cos(30deg)-22 = 123.84-22 = 101.84 from
+       centre) - is G = 101.84-99 = 2.84 canvas px, confirmed as the target look. The charge
+       window to its right was re-derived to hit this same G against its own nearest numeral
+       (3) - see that window's own comment below. The cogs window was also tried against this
+       G at one point (its own comment above still notes the numbers) but was put back to its
+       prior position on request, so it's the odd one out here. ---- */
     date_box = lv_obj_create(face_classic_410);
-    lv_obj_set_size(date_box, 136, 44);
-    lv_obj_set_pos(date_box, SCREEN_CX - 68, SCREEN_CY + 55 - 22);
+    // 2026-08-29: width brought in 16px (136 -> 120), kept centred (half-width 68 -> 60) - the
+    // vertical gap to numerals "7"/"5" (G, see above) is unaffected since it only depends on
+    // the box's top/bottom edges and x-overlap with those numerals still holds at this width.
+    lv_obj_set_size(date_box, 120, 44);
+    lv_obj_set_pos(date_box, SCREEN_CX - 60, SCREEN_CY + 55);
     lv_obj_set_style_bg_color(date_box, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(date_box, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(date_box, lv_palette_main(LV_PALETTE_RED), 0);
@@ -314,6 +353,87 @@ void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     lv_obj_set_style_border_width(date_label, 0, 0);
     lv_label_set_text(date_label, "??? --");
     lv_obj_center(date_label);
+
+    /* ---- Charge window - near the "3" numeral. Box is narrower than the date window (92 vs
+       136) since "100%" plus the power-state indicator needs less width than "SUN 31".
+       Radius offset history, tuned against the actual hardware render rather than pure
+       label-box math (which twice missed - the "3" glyph's real ink extent inside its 60px
+       label box, sized for two-digit numerals, isn't something this code can measure):
+       55 (original) -> 64 (matched to G against the label box's full edge - confirmed still
+       too far, i.e. gap bigger than the date window's own G) -> 84 (matched to G against an
+       assumed 10px glyph half-width - confirmed overshot, gap smaller than G). 64 and 84
+       bracket the real answer from opposite sides, so rather than guess a third glyph width,
+       split the difference: 74. ---- */
+    {
+        const int32_t CHG_W = 92, CHG_H = 40;
+        const int32_t CHG_RADIUS = 74;
+        int32_t chg_x = SCREEN_CX + CHG_RADIUS - CHG_W / 2;
+        int32_t chg_y = SCREEN_CY - CHG_H / 2;
+
+        charge_box = lv_obj_create(face_classic_410);
+        lv_obj_set_size(charge_box, CHG_W, CHG_H);
+        lv_obj_set_pos(charge_box, chg_x, chg_y);
+        lv_obj_set_style_bg_color(charge_box, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(charge_box, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(charge_box, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_set_style_border_width(charge_box, 2, 0);
+        lv_obj_set_style_radius(charge_box, 8, 0);
+        lv_obj_set_style_pad_all(charge_box, 4, 0);
+        lv_obj_remove_flag(charge_box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(charge_box, LV_OBJ_FLAG_CLICKABLE);
+
+        charge_label = lv_label_create(charge_box);
+        lv_obj_set_style_text_font(charge_label, &lv_font_montserrat_22, 0);
+        lv_obj_set_style_text_color(charge_label, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(charge_label, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(charge_label, 0, 0);
+        lv_label_set_text(charge_label, "--%");
+        // 2026-08-29: swapped to the right side of the box (was LEFT_MID) so the
+        // power-state indicator - now on the left, see charge_dot/charge_bolt below - reads
+        // before the percentage, left to right. Nudged +2px right again right after (-4 -> -2).
+        lv_obj_align(charge_label, LV_ALIGN_RIGHT_MID, -2, 0);
+
+        // Power-state indicator, left side of the box (2026-08-29: swapped from the right,
+        // per explicit request), vertically centred on it (chg_cy). None of this project's
+        // built-in font sizes carry LV_SYMBOL_USB/CHARGE/BATTERY_* glyphs (checked against the
+        // actual compiled lv_font_montserrat_*.c files - only a small hand-picked symbol
+        // subset is baked in, and charge-related ones aren't in it), and the file header above
+        // commits this face to LVGL primitives rather than new raster assets, so the indicator
+        // is drawn as a plain circle (charge_dot) plus a separate bolt line (charge_bolt)
+        // instead of a font glyph or image.
+        int32_t chg_cy = chg_y + CHG_H / 2;
+
+        charge_dot = lv_obj_create(face_classic_410);
+        lv_obj_set_size(charge_dot, 14, 14);
+        // 2026-08-29: nudged +2px right (chg_x+6 -> chg_x+8), same request as charge_label above.
+        lv_obj_set_pos(charge_dot, chg_x + 8, chg_cy - 7);
+        lv_obj_set_style_radius(charge_dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(charge_dot, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(charge_dot, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_color(charge_dot, lv_color_white(), 0);
+        lv_obj_set_style_border_width(charge_dot, 2, 0);
+        lv_obj_remove_flag(charge_dot, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(charge_dot, LV_OBJ_FLAG_CLICKABLE);
+
+        // Static zigzag bolt, same absolute-screen-coordinate convention the hands use below
+        // (lv_line points given directly in screen space since face_classic_410's own origin
+        // is the screen origin) - the shape never changes at runtime, only its hidden flag
+        // does, toggled opposite to charge_dot in update_status_classic_410.
+        // 2026-08-29: nudged +2px right (chg_x+9 -> chg_x+11), same request as charge_dot above.
+        int32_t bolt_x = chg_x + 11, bolt_y = chg_cy - 8;
+        bolt_pts[0] = (lv_point_precise_t){ (lv_value_precise_t)(bolt_x + 3), (lv_value_precise_t)bolt_y };
+        bolt_pts[1] = (lv_point_precise_t){ (lv_value_precise_t)(bolt_x - 3), (lv_value_precise_t)(bolt_y + 8) };
+        bolt_pts[2] = (lv_point_precise_t){ (lv_value_precise_t)(bolt_x + 1), (lv_value_precise_t)(bolt_y + 8) };
+        bolt_pts[3] = (lv_point_precise_t){ (lv_value_precise_t)(bolt_x - 3), (lv_value_precise_t)(bolt_y + 16) };
+
+        charge_bolt = lv_line_create(face_classic_410);
+        lv_obj_set_style_line_color(charge_bolt, lv_color_hex(0xFFD400), 0);
+        lv_obj_set_style_line_width(charge_bolt, 3, 0);
+        lv_obj_set_style_line_rounded(charge_bolt, true, 0);
+        lv_line_set_points(charge_bolt, bolt_pts, 4);
+        lv_obj_remove_flag(charge_bolt, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(charge_bolt, LV_OBJ_FLAG_HIDDEN);
+    }
 
     /* ---- Cogs window - 12 o'clock. The visible frame (dark fill, red arc/radial border) is
        now drawn on the canvas in Pass 4 above, at radius COG_OUTER_R..COG_INNER_R; mech_win
@@ -504,25 +624,51 @@ void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, l
     }
 
     /* ---- Clock hands ---- */
+    // Main hands (hour/minute) only, per explicit request - the second hand stays fully
+    // opaque as an accent, not a "main hand". The hour/minute centre stripes get the same
+    // HAND_OPA applied below too (also requested), each with a separate 1px fully-opaque
+    // core line (hour_stripe_core/min_stripe_core, same points, drawn right on top) so a
+    // thin opaque line still shows through the middle of each translucent stripe.
+    // 2026-08-29: widened 7 -> 11 (+2px, then +2px more on top of that per explicit request -
+    // this was originally applied to the wrong hand, see min_hand below) - only the white
+    // part, the red centre stripe/core on top are unchanged ("not inner red parts"). Tip
+    // length shortened separately below in update_time_classic_410 (hour_pts[1]) to 75% of
+    // its original 85 per explicit request; tail length (hour_pts[0]) untouched.
     hour_hand = lv_line_create(face_classic_410);
     lv_obj_set_style_line_color(hour_hand, lv_color_white(), 0);
-    lv_obj_set_style_line_width(hour_hand, 7, 0);
+    lv_obj_set_style_line_width(hour_hand, 11, 0);
     lv_obj_set_style_line_rounded(hour_hand, true, 0);
+    lv_obj_set_style_line_opa(hour_hand, HAND_OPA, 0);
 
+    // 2026-08-29: widened 4 -> 6 (+2px, explicit request), separate from the hour hand's own
+    // width/length changes above.
     min_hand = lv_line_create(face_classic_410);
     lv_obj_set_style_line_color(min_hand, lv_color_white(), 0);
-    lv_obj_set_style_line_width(min_hand, 4, 0);
+    lv_obj_set_style_line_width(min_hand, 6, 0);
     lv_obj_set_style_line_rounded(min_hand, true, 0);
+    lv_obj_set_style_line_opa(min_hand, HAND_OPA, 0);
 
     hour_stripe = lv_line_create(face_classic_410);
     lv_obj_set_style_line_color(hour_stripe, lv_color_hex(0xFF0000), 0);
     lv_obj_set_style_line_width(hour_stripe, 2, 0);
     lv_obj_set_style_line_rounded(hour_stripe, true, 0);
+    lv_obj_set_style_line_opa(hour_stripe, HAND_OPA, 0);
+
+    hour_stripe_core = lv_line_create(face_classic_410);
+    lv_obj_set_style_line_color(hour_stripe_core, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_line_width(hour_stripe_core, 1, 0);
+    lv_obj_set_style_line_rounded(hour_stripe_core, true, 0);
 
     min_stripe = lv_line_create(face_classic_410);
     lv_obj_set_style_line_color(min_stripe, lv_color_hex(0xFF0000), 0);
     lv_obj_set_style_line_width(min_stripe, 2, 0);
     lv_obj_set_style_line_rounded(min_stripe, true, 0);
+    lv_obj_set_style_line_opa(min_stripe, HAND_OPA, 0);
+
+    min_stripe_core = lv_line_create(face_classic_410);
+    lv_obj_set_style_line_color(min_stripe_core, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_line_width(min_stripe_core, 1, 0);
+    lv_obj_set_style_line_rounded(min_stripe_core, true, 0);
 
     sec_hand = lv_line_create(face_classic_410);
     lv_obj_set_style_line_color(sec_hand, lv_color_hex(0xFF0000), 0);
@@ -577,14 +723,18 @@ void update_time_classic_410(int second, int minute, int hour, bool mode, bool a
     float sec_angle  = second * 6.0f;
 
     hour_pts[0] = hand_tip(SCREEN_CX, SCREEN_CY, hour_angle + 180.0f, 15.0f);
-    hour_pts[1] = hand_tip(SCREEN_CX, SCREEN_CY, hour_angle, 85.0f);
+    // 2026-08-29: shortened 85 -> 64 (75% of original 85, i.e. 85*0.75=63.75 rounded), per
+    // explicit request - this was originally (mis-)applied to the minute hand below instead.
+    hour_pts[1] = hand_tip(SCREEN_CX, SCREEN_CY, hour_angle, 64.0f);
     lv_line_set_points(hour_hand, hour_pts, 2);
     lv_line_set_points(hour_stripe, hour_pts, 2);
+    lv_line_set_points(hour_stripe_core, hour_pts, 2);
 
     min_pts[0] = hand_tip(SCREEN_CX, SCREEN_CY, min_angle + 180.0f, 20.0f);
     min_pts[1] = hand_tip(SCREEN_CX, SCREEN_CY, min_angle, 130.0f);
     lv_line_set_points(min_hand, min_pts, 2);
     lv_line_set_points(min_stripe, min_pts, 2);
+    lv_line_set_points(min_stripe_core, min_pts, 2);
 
     sec_pts[0] = (lv_point_precise_t){ (lv_value_precise_t)SCREEN_CX, (lv_value_precise_t)SCREEN_CY };
     sec_pts[1] = hand_tip(SCREEN_CX, SCREEN_CY, sec_angle, 150.0f);
@@ -604,11 +754,23 @@ void update_weather_classic_410(int temp, int icon)
 #endif
 }
 
-void update_status_classic_410(int battery, bool connection){
+void update_status_classic_410(int battery, bool connection, bool plugged, bool charging){
 #ifdef ENABLE_FACE_CLASSIC_410
     if (!face_classic_410)
     {
         return;
+    }
+
+    lv_label_set_text_fmt(charge_label, "%d%%", battery);
+
+    if (charging) {
+        lv_obj_add_flag(charge_dot, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(charge_bolt, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(charge_bolt, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(charge_dot, LV_OBJ_FLAG_HIDDEN);
+        // Filled when plugged in (not charging - topped up), hollow ring when on battery.
+        lv_obj_set_style_bg_opa(charge_dot, plugged ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     }
 
 #endif
@@ -637,19 +799,19 @@ void update_health_classic_410(int bpm, int oxygen)
 }
 
 void update_all_classic_410(int second, int minute, int hour, bool mode, bool am, int day, int month, int year, int weekday,
-    int temp, int icon, int battery, bool connection, int steps, int distance, int kcal, int bpm, int oxygen)
+    int temp, int icon, int battery, bool connection, bool plugged, bool charging, int steps, int distance, int kcal, int bpm, int oxygen)
 {
 #ifdef ENABLE_FACE_CLASSIC_410
     update_time_classic_410(second, minute, hour, mode, am, day, month, year, weekday);
     update_weather_classic_410(temp, icon);
-    update_status_classic_410(battery, connection);
+    update_status_classic_410(battery, connection, plugged, charging);
     update_activity_classic_410(steps, distance, kcal);
     update_health_classic_410(bpm, oxygen);
 #endif
 }
 
 void update_check_classic_410(lv_obj_t *root, int second, int minute, int hour, bool mode, bool am, int day, int month, int year, int weekday,
-    int temp, int icon, int battery, bool connection, int steps, int distance, int kcal, int bpm, int oxygen)
+    int temp, int icon, int battery, bool connection, bool plugged, bool charging, int steps, int distance, int kcal, int bpm, int oxygen)
 {
 #ifdef ENABLE_FACE_CLASSIC_410
     if (root != face_classic_410)
@@ -658,7 +820,7 @@ void update_check_classic_410(lv_obj_t *root, int second, int minute, int hour, 
     }
     update_time_classic_410(second, minute, hour, mode, am, day, month, year, weekday);
     update_weather_classic_410(temp, icon);
-    update_status_classic_410(battery, connection);
+    update_status_classic_410(battery, connection, plugged, charging);
     update_activity_classic_410(steps, distance, kcal);
     update_health_classic_410(bpm, oxygen);
 #endif

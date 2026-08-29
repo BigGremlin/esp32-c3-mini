@@ -31,13 +31,13 @@ extern "C"
     void init_face_classic_410(void (*callback)(const char*, const lv_img_dsc_t *, lv_obj_t **, lv_obj_t **));
     void update_time_classic_410(int second, int minute, int hour, bool mode, bool am, int day, int month, int year, int weekday);
     void update_weather_classic_410(int temp, int icon);
-    void update_status_classic_410(int battery, bool connection);
+    void update_status_classic_410(int battery, bool connection, bool plugged, bool charging);
     void update_activity_classic_410(int steps, int distance, int kcal);
     void update_health_classic_410(int bpm, int oxygen);
     void update_all_classic_410(int second, int minute, int hour, bool mode, bool am, int day, int month, int year, int weekday,
-                int temp, int icon, int battery, bool connection, int steps, int distance, int kcal, int bpm, int oxygen);
+                int temp, int icon, int battery, bool connection, bool plugged, bool charging, int steps, int distance, int kcal, int bpm, int oxygen);
     void update_check_classic_410(lv_obj_t *root, int second, int minute, int hour, bool mode, bool am, int day, int month, int year, int weekday,
-                int temp, int icon, int battery, bool connection, int steps, int distance, int kcal, int bpm, int oxygen);
+                int temp, int icon, int battery, bool connection, bool plugged, bool charging, int steps, int distance, int kcal, int bpm, int oxygen);
 
 
 #ifdef __cplusplus
