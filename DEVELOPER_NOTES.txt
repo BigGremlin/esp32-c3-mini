@@ -2826,3 +2826,41 @@ faces' `update_check_*` calls are untouched, so this doesn't touch any other wat
 
 State going into this entry: all of the above was uncommitted in the working tree; this entry was
 written and committed together with the code in the same pass.
+
+------------------------------------------------------------------------------------------------
+2026-08-30 - Step 6 retry #4 (gpio_wakeup_enable, edge/level-triggered GPIO wake) - CONFIRMED
+WORKING on real battery; timer safety net then disabled (dormant) pending power-cost verification
+------------------------------------------------------------------------------------------------
+Replaced retry #3's 200ms `digitalRead()` timer-poll in `deep_idle_loop()` (`hal/esp32/app_hal.cpp`)
+with a genuine GPIO wake source: `esp_sleep_enable_gpio_wakeup()` +
+`gpio_wakeup_enable(GPIO_NUM_0, GPIO_INTR_LOW_LEVEL)`. Per ESP-IDF docs `ESP_SLEEP_WAKEUP_GPIO` is a
+different mechanism from ext0/ext1's RTC_PERIPH-domain wake (cont. 5/6's failure mode) and does not
+switch the pin into RTC-IO function, so the theory going in was that it might sidestep whatever's
+actually failing on this board's RTCLDO/VDD3P3_RTC rail on battery. Kept a 3s periodic
+`esp_sleep_enable_timer_wakeup()` alongside it as a safety net, so the while-loop's exit condition
+(`extremePowerSave`/`touchAsleep`/`bleAsleep`/`on_battery()`) still gets rechecked periodically with
+no button press - e.g. a charger plugged in while asleep.
+
+**Confirmed working on real battery** - button press reliably wakes the watch from sleep off USB
+power, the first thing in this whole step-6 saga (ext0, ext1, retry #4) to do so with an actual
+GPIO wake source rather than falling back to plain timer-polling. Retry #3 remains in a comment
+block directly above `deep_idle_loop()` as the known-working fallback, with the exact revert steps,
+in case this regresses under further soak testing the way ext0/ext1 did.
+
+Early soak testing also surfaced an intermittent "takes multiple clicks to sleep/wake" symptom.
+Before spending any debugging time on it, user identified the likely cause themselves: clicking
+sleep/wake in rapid succession while testing, not giving the first click's action time to complete
+- most likely a red herring rather than a real bug in the new wake path. Noted here rather than
+acted on; revisit only if it recurs under normal (non-rapid-fire) use.
+
+**Timer safety net then disabled (commented out, not removed)**, same session: user is separately
+(informally, not yet confirmed) suspecting the periodic 3s CPU wake-and-recheck may itself be a
+meaningful power cost, distinct from whichever wake path is used to actually respond to the button.
+The `esp_sleep_enable_timer_wakeup(3000000)` call is left in place as a commented-out line with an
+explanation, so `deep_idle_loop()` now blocks in `esp_light_sleep_start()` until the GPIO wake fires
+with no periodic recheck at all - re-enabling the safety net (if e.g. charger-plugged-in-while-
+asleep detection turns out to need it) is a one-line uncomment. Not yet soak-tested in this
+timer-disabled form; battery-life impact of the 3s poll itself is still unverified, not measured.
+
+Built clean for `lolin_s3_2_06` (`pio run -e lolin_s3_2_06`); not yet flashed at the point this
+entry was written.

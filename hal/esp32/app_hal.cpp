@@ -55,6 +55,7 @@
 
 
 #include "driver/rtc_io.h"
+#include "driver/gpio.h"
 
 #include "FS.h"
 #include "FFat.h"
@@ -393,30 +394,61 @@ bool staying_on_for_charging()
 }
 
 #if ESPS3_2_06
-/* Extreme Power Save step 6, retry #3: timer-only polling instead of a GPIO
-   wake source. Attempts #1 (ext0) and #2 (ext1) both proved the RTC-GPIO
-   wake circuit itself is unreliable off USB power (confirmed live: ext1
-   worked cleanly while connected, failed identically to ext0 once actually
-   on battery - almost certainly a clock domain ESP-IDF only keeps alive
-   while a USB host is attached, per DEVELOPER_NOTES.txt cont. 5/6). But the
-   plain TIMER wake was 100% reliable in every single test across both
-   attempts (rc=0, clean, every cycle, no exceptions) - so this version
-   doesn't use a GPIO wake source at all. It just polls GPIO0 with a normal
+/* Extreme Power Save step 6, retry #3 (kept as the proven fallback, see
+   retry #4 below): timer-only polling instead of a GPIO wake source.
+   Attempts #1 (ext0) and #2 (ext1) both proved the RTC-GPIO wake circuit
+   itself is unreliable off USB power (confirmed live: ext1 worked cleanly
+   while connected, failed identically to ext0 once actually on battery -
+   almost certainly a clock domain ESP-IDF only keeps alive while a USB
+   host is attached, per DEVELOPER_NOTES.txt cont. 5/6). But the plain
+   TIMER wake was 100% reliable in every single test across both attempts
+   (rc=0, clean, every cycle, no exceptions) - so this version doesn't use
+   a GPIO wake source at all. It just polls GPIO0 with a normal
    digitalRead() each time the timer wakes it, on a short interval for
-   still-reasonably-snappy response. GPIO0 never switches to RTC-IO function
-   this way - it stays in Button2's own digital mode throughout, which
-   sidesteps the whole RTC-wake-circuit class of problem entirely, not just
-   works around it. */
+   still-reasonably-snappy response. GPIO0 never switches to RTC-IO
+   function this way - it stays in Button2's own digital mode throughout,
+   which sidesteps the whole RTC-wake-circuit class of problem entirely,
+   not just works around it.
+
+   Extreme Power Save step 6, retry #4 (CURRENT, UNTESTED ON BATTERY): swap
+   the 200ms timer poll for a genuine edge/level-triggered GPIO wake source
+   via gpio_wakeup_enable()/esp_sleep_enable_gpio_wakeup(). Per ESP-IDF docs
+   this is a light-sleep-only wake source that does NOT switch the pin into
+   RTC-IO function the way ext0/ext1 do (ESP_SLEEP_WAKEUP_GPIO is a
+   different mechanism from ext0/ext1's RTC_PERIPH-domain wake), so it may
+   sidestep whatever's actually failing on this board's RTCLDO/VDD3P3_RTC
+   rail on battery - see the 2026-08-30 research write-up in
+   DEVELOPER_NOTES.txt for the schematic-derived theory on why ext0/ext1
+   fail here. The timer wake is kept, but only as an infrequent safety net
+   so the while-condition below (extremePowerSave/touchAsleep/bleAsleep/
+   on_battery()) still gets re-checked periodically even with no button
+   press - e.g. if a charger gets plugged in while asleep - not as the
+   primary wake path anymore. If this turns out to fail on real battery the
+   same way ext0/ext1 did, retry #3 above is the known-working fallback:
+   drop the gpio_wakeup_enable()/esp_sleep_enable_gpio_wakeup() calls and
+   the two disable calls at the end of this function, and shorten the timer
+   back to 200ms. */
 void deep_idle_loop()
 {
-  Timber.i("deep_idle_loop: entering (timer-poll)");
+  Timber.i("deep_idle_loop: entering (gpio wakeup only, timer safety net dormant)");
   Serial.flush();
+
+  esp_sleep_enable_gpio_wakeup();
+  gpio_wakeup_enable(GPIO_NUM_0, GPIO_INTR_LOW_LEVEL); // button is active-low
 
   int iterations = 0;
   while (extremePowerSave && touchAsleep && bleAsleep && on_battery())
   {
     iterations++;
-    esp_sleep_enable_timer_wakeup(200000); // poll every 200ms
+    // Timer safety net disabled 2026-08-30: waking the main CPU every 3s to
+    // recheck the while-condition (e.g. charger plugged in while asleep) is
+    // suspected to be a significant power cost in its own right, separate
+    // from the GPIO wake path itself. Pure GPIO wake means this loop now
+    // only re-checks the while-condition when the button actually wakes it.
+    // Re-enable by uncommenting the line below if that safety net is needed
+    // again (e.g. charger-plugged-in-while-asleep stops being detected
+    // promptly enough).
+    // esp_sleep_enable_timer_wakeup(3000000); // safety-net recheck every 3s
     esp_light_sleep_start();
 
     if (digitalRead(0) == LOW) // button pressed (active low)
@@ -457,6 +489,10 @@ void deep_idle_loop()
       break;
     }
   }
+
+  gpio_wakeup_disable(GPIO_NUM_0);
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+
   Timber.i("deep_idle_loop: exited after %d iterations", iterations);
   Serial.flush();
 
