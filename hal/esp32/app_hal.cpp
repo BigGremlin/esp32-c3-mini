@@ -1559,8 +1559,95 @@ void onFaceSelected(lv_event_t *e)
   prefs.putInt("watchface", index);
 }
 
+// Renders ui_home (the dial currently in use, whatever it is at the moment
+// this is called) into an off-screen RGB565 buffer via LVGL's snapshot API
+// and writes it out as an uncompressed 24bpp BMP - no PNG/JPEG encoder is
+// linked into this build, and BMP needs none. lv_snapshot_take() renders the
+// object tree directly, independent of which screen is currently active, so
+// this works even after the caller has already switched the active screen
+// away from ui_home.
+void save_dial_screengrab()
+{
+  lv_draw_buf_t *snap = lv_snapshot_take(ui_home, LV_COLOR_FORMAT_RGB565);
+  if (!snap)
+  {
+    Timber.w("save_dial_screengrab: lv_snapshot_take failed (out of memory?)");
+    return;
+  }
+
+  uint32_t w = snap->header.w;
+  uint32_t h = snap->header.h;
+  uint32_t stride = snap->header.stride;
+  uint32_t rowBytes = w * 3; // 24bpp BMP; 240px rows are already 4-byte aligned
+  uint32_t imageSize = rowBytes * h;
+
+  // Filename starts with the dial's own name, so each dial overwrites only
+  // its own previous grab (FILE_WRITE truncates) rather than accumulating.
+  String path = "/" + String(faces[currentIndex].name) + ".bmp";
+  File file = FLASH.open(path, FILE_WRITE);
+  if (!file)
+  {
+    Timber.w("save_dial_screengrab: failed to open %s for write", path.c_str());
+    lv_draw_buf_destroy(snap);
+    return;
+  }
+
+  uint8_t fileHeader[14] = {'B', 'M', 0, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0};
+  uint32_t fileSize = 54 + imageSize;
+  fileHeader[2] = fileSize & 0xFF;
+  fileHeader[3] = (fileSize >> 8) & 0xFF;
+  fileHeader[4] = (fileSize >> 16) & 0xFF;
+  fileHeader[5] = (fileSize >> 24) & 0xFF;
+
+  uint8_t infoHeader[40] = {0};
+  infoHeader[0] = 40; // DIB header size
+  int32_t iw = (int32_t)w, ih = (int32_t)h; // positive height = bottom-up rows
+  memcpy(&infoHeader[4], &iw, 4);
+  memcpy(&infoHeader[8], &ih, 4);
+  infoHeader[12] = 1;  // planes
+  infoHeader[14] = 24; // bits per pixel
+  memcpy(&infoHeader[20], &imageSize, 4);
+
+  file.write(fileHeader, sizeof(fileHeader));
+  file.write(infoHeader, sizeof(infoHeader));
+
+  uint8_t *row = (uint8_t *)malloc(rowBytes);
+  if (!row)
+  {
+    Timber.w("save_dial_screengrab: no memory for row buffer");
+    file.close();
+    lv_draw_buf_destroy(snap);
+    return;
+  }
+
+  // BMP rows go bottom-to-top; the snapshot buffer is top-to-bottom.
+  for (int32_t y = (int32_t)h - 1; y >= 0; y--)
+  {
+    const uint16_t *src = (const uint16_t *)(snap->data + y * stride);
+    for (uint32_t x = 0; x < w; x++)
+    {
+      uint16_t px = src[x];
+      uint8_t r5 = (px >> 11) & 0x1F;
+      uint8_t g6 = (px >> 5) & 0x3F;
+      uint8_t b5 = px & 0x1F;
+      row[x * 3 + 0] = (b5 << 3) | (b5 >> 2); // B
+      row[x * 3 + 1] = (g6 << 2) | (g6 >> 4); // G
+      row[x * 3 + 2] = (r5 << 3) | (r5 >> 2); // R
+    }
+    file.write(row, rowBytes);
+  }
+
+  free(row);
+  file.close();
+  lv_draw_buf_destroy(snap);
+
+  Timber.i("save_dial_screengrab: saved %s (%ux%u)", path.c_str(), (unsigned)w, (unsigned)h);
+}
+
 void on_watchface_list_open()
 {
+  // Grab the outgoing dial before anything else about this event runs.
+  save_dial_screengrab();
   feedbackVibrate(v_notif, 2, true);
 }
 

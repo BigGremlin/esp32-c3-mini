@@ -2863,4 +2863,53 @@ asleep detection turns out to need it) is a one-line uncomment. Not yet soak-tes
 timer-disabled form; battery-life impact of the 3s poll itself is still unverified, not measured.
 
 Built clean for `lolin_s3_2_06` (`pio run -e lolin_s3_2_06`); not yet flashed at the point this
-entry was written.
+entry was written. Flashed later the same session; user confirmed button-wake still works with the
+timer safety net disabled and is soak-testing further.
+
+------------------------------------------------------------------------------------------------
+2026-08-30 (cont.) - added automatic dial screengrab on opening the face-select ("dial selector")
+screen, via LVGL's snapshot API
+------------------------------------------------------------------------------------------------
+`on_watchface_list_open()` (`hal/esp32/app_hal.cpp`) is the existing single hook already called
+right when the long-press-on-home dial-selector screen opens - added `save_dial_screengrab()`,
+called as its first line, so the outgoing dial gets captured before anything else about that event
+runs.
+
+`save_dial_screengrab()` renders `ui_home` (whichever dial is currently in use) off-screen via
+`lv_snapshot_take(ui_home, LV_COLOR_FORMAT_RGB565)` - deliberately chosen over reading back the
+display driver's own framebuffer, since it renders the object tree directly and so works
+correctly even if the caller has already switched the active screen away from `ui_home` by the
+time this runs. Required flipping `LV_USE_SNAPSHOT` 0->1 in `include/lv_conf.h` (was compiled out
+entirely; a first build after that change silently linked against the old cached, still-disabled
+`lv_snapshot.c.o` - PlatformIO's incremental build didn't recompile it off the `lv_conf.h` edit
+alone, throwing `undefined reference to lv_snapshot_take` at link time. Fixed with a full
+`pio run -e lolin_s3_2_06 -t clean` before rebuilding. Worth remembering if a future `lv_conf.h`
+flag flip produces the same link error.
+
+No PNG/JPEG encoder is linked into this build, so the snapshot's raw RGB565 buffer is written out
+as an uncompressed 24bpp BMP (hand-rolled ~70-line encoder, no new library dependency) - simplest
+format that needs no compression and that any image viewer opens directly once transferred off the
+watch. Filename is `/<dial-name>.bmp` (`faces[currentIndex].name`, e.g. `/citizen_410.bmp`), so
+`FILE_WRITE`'s truncate-on-open naturally overwrites only that dial's own previous grab rather than
+accumulating one file per capture.
+
+Memory footprint: the snapshot buffer for a 240x240 dial is ~115KB, one-shot from
+`lv_snapshot_take`'s internal `lv_malloc`, which resolves to plain `malloc()` in this build
+(`LV_USE_STDLIB_MALLOC=LV_STDLIB_CLIB` - `LV_MEM_SIZE`'s 144KB build flag governs the *other*,
+unused, `LV_STDLIB_BUILTIN` allocator, so it doesn't cap this at all). This board carries
+`BOARD_HAS_PSRAM`, and Arduino-ESP32 routes large `malloc()` calls above its internal default
+threshold to PSRAM automatically when PSRAM is enabled - not re-verified from source this session,
+noted as the reasoning for not routing this through `ps_malloc()` explicitly. If a screengrab
+crashes or silently fails on real hardware, check actual free-heap/free-PSRAM at the call site
+before assuming this reasoning held.
+
+Transfer-off-watch mechanism (getting these `.bmp` files onto a PC) explicitly deferred - user
+asked for the capture-and-save half now, said to come back "later" for the transfer half. No
+existing file-download-from-watch path found in this codebase to reuse (the only related code is
+the *upload* path for custom faces around `writeFile`/`transfer` further down this same file) - a
+transfer mechanism will need to be designed from scratch when that's asked for, likely serial- or
+BLE-based given how the rest of this project talks to the watch.
+
+Built clean for `lolin_s3_2_06`; not yet flashed or tested on real hardware at the point this entry
+was written - the capture logic itself (buffer layout, BMP header math, RGB565->RGB888 expansion)
+has not been visually verified against a real dial yet.
