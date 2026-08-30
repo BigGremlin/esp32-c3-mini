@@ -838,17 +838,22 @@ void deleteFile(const char *path)
 
 bool setupFS()
 {
-
-#ifndef ENABLE_CUSTOM_FACE
-  return false;
-#endif
-
+  // FFat must mount unconditionally - it's now also where save_dial_screengrab()
+  // writes .bmp files, not just the custom-face feature below. Previously this
+  // whole function (including FLASH.begin() itself) was skipped outright
+  // whenever ENABLE_CUSTOM_FACE wasn't defined, so the filesystem never mounted
+  // at all on builds without it (confirmed via this board's own boot log:
+  // "Setup FS failed" every time, since FLASH.begin() was never even reached).
   if (!FLASH.begin(true, "/ffat", MAX_FILE_OPEN))
   {
     FLASH.format();
 
     return false;
   }
+
+#ifndef ENABLE_CUSTOM_FACE
+  return true;
+#endif
 
   static lv_fs_drv_t sd_drv;
   lv_fs_drv_init(&sd_drv);
