@@ -2896,12 +2896,25 @@ accumulating one file per capture.
 Memory footprint: the snapshot buffer for a 240x240 dial is ~115KB, one-shot from
 `lv_snapshot_take`'s internal `lv_malloc`, which resolves to plain `malloc()` in this build
 (`LV_USE_STDLIB_MALLOC=LV_STDLIB_CLIB` - `LV_MEM_SIZE`'s 144KB build flag governs the *other*,
-unused, `LV_STDLIB_BUILTIN` allocator, so it doesn't cap this at all). This board carries
-`BOARD_HAS_PSRAM`, and Arduino-ESP32 routes large `malloc()` calls above its internal default
-threshold to PSRAM automatically when PSRAM is enabled - not re-verified from source this session,
-noted as the reasoning for not routing this through `ps_malloc()` explicitly. If a screengrab
-crashes or silently fails on real hardware, check actual free-heap/free-PSRAM at the call site
-before assuming this reasoning held.
+unused, `LV_STDLIB_BUILTIN` allocator, so it doesn't cap this at all). **Verified from source**
+(not just assumed): `hal_setup()` already calls `heap_caps_malloc_extmem_enable(128)` on this board
+(see that call's own comment, from the 2026-07-30 wake-from-sleep heap-exhaustion investigation),
+which routes any `malloc()` >=128 bytes to the 8MB PSRAM automatically - so this allocation was
+never actually at risk from the scarce ~183KB internal heap (which the same boot log shows sitting
+at ~92% used even at idle, an already-known, already-accepted baseline from that same investigation
+- not something this session's changes affected).
+
+**Real blocker found and fixed**: separately from the memory question, `save_dial_screengrab()`
+couldn't have written anything at all on the first flash of this feature - `setupFS()`
+(`hal/esp32/app_hal.cpp:839`) returned `false` *before ever calling `FLASH.begin()`* whenever
+`ENABLE_CUSTOM_FACE` wasn't defined, which it isn't for `lolin_s3_2_06`. Confirmed live via serial:
+boot log read `Setup FS failed` every time. So the filesystem was never mounted at all on this
+board's build - not a new regression, a pre-existing gap this feature was the first thing to expose
+by actually needing `FLASH` outside the custom-face path. Fixed by always calling `FLASH.begin()`
+in `setupFS()` and only gating the `lv_fs_drv`/custom-face registration behind `ENABLE_CUSTOM_FACE`.
+Reflashed and confirmed via boot log: `Flash: Total 7118848 => Used 0`, `Drive S is ready` - FFat
+now mounts cleanly, ~6.8MB usable (`ffat` partition is 0x6E0000 per `partitions_16M.csv`), so a
+~173KB BMP is not remotely a storage-capacity concern.
 
 Transfer-off-watch mechanism (getting these `.bmp` files onto a PC) explicitly deferred - user
 asked for the capture-and-save half now, said to come back "later" for the transfer half. No
@@ -2909,6 +2922,11 @@ existing file-download-from-watch path found in this codebase to reuse (the only
 the *upload* path for custom faces around `writeFile`/`transfer` further down this same file) - a
 transfer mechanism will need to be designed from scratch when that's asked for, likely serial- or
 BLE-based given how the rest of this project talks to the watch.
+
+State at the point this entry was written: flashed and boot-confirmed (FS mounts, no crash), but
+the actual capture path itself - long-pressing home to open the dial selector and checking a
+`/<dial-name>.bmp` shows up with correct-looking pixel content - has NOT yet been exercised on real
+hardware. That's the next thing to confirm, not yet a finished/working fact.
 
 Built clean for `lolin_s3_2_06`; not yet flashed or tested on real hardware at the point this entry
 was written - the capture logic itself (buffer layout, BMP header math, RGB565->RGB888 expansion)
