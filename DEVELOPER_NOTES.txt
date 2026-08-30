@@ -2931,3 +2931,53 @@ hardware. That's the next thing to confirm, not yet a finished/working fact.
 Built clean for `lolin_s3_2_06`; not yet flashed or tested on real hardware at the point this entry
 was written - the capture logic itself (buffer layout, BMP header math, RGB565->RGB888 expansion)
 has not been visually verified against a real dial yet.
+
+------------------------------------------------------------------------------------------------
+2026-08-30 (cont.) - dial screengrab: BMP row-padding bug found+fixed, ad hoc serial retrieval
+tool built, real dials visually confirmed, "Screengrabber" on/off switch added
+------------------------------------------------------------------------------------------------
+**Real capture bug found via actual retrieval, not inspection**: the BMP writer computed
+`rowBytes = w * 3` with no padding. That happened to work by coincidence for the 240x240 case this
+was first written against, but this board's real display is **410x502** (matches the `_410` face
+naming convention - `classic_410`, `citizen_410`, `batman_410` are all built for a 410-wide
+canvas), and 410*3=1230 isn't a multiple of 4 - BMP rows must be padded to a 4-byte boundary per
+spec, and most decoders (PIL included, confirmed) compute that stride themselves from width/bpp
+rather than trusting the header's own `biSizeImage`/file-size fields. Every capture from the first
+round was silently corrupt - PIL reported `image file is truncated`. Fixed with
+`rowBytes = (w*3 + 3) & ~3u`, zero-filled row buffer (`calloc`) so the padding bytes are always 0.
+
+**No download-from-watch path existed, so a minimal one was built** (`handleSerialCommands()`,
+wired into `hal_loop()`): a tiny text protocol over the same USB-CDC serial link already used for
+flashing - `LIST` enumerates FFat with sizes, `GET:<name>` streams the raw file bytes framed by
+`BEGIN:<name>:<size>`/`END:<name>` markers. A `serialDumpActive` flag added to `logCallback()`
+suppresses Timber's own `Serial.print` during a GET so log lines can't land mid-stream and corrupt
+the byte count - doesn't cover the scattered direct `Serial.print()` calls elsewhere in this file,
+fine for a manual, deliberate retrieval with no button presses mid-transfer, not a general fix.
+Paired with a local `fetch_screengrabs.py` (pyserial) that lists, downloads, and saves each `.bmp`.
+Explicitly a temporary tool for this task, not the "real" transfer mechanism (BLE via the phone
+app, most likely) that was already deferred earlier in this same session - revisit if/when that's
+asked for.
+
+**Visually confirmed working** after the padding fix: pulled `Classic.bmp`/`Citizen.bmp`/
+`Batman.bmp` off the watch, converted to PNG (Pillow), all three loaded correctly at 410x502 and
+showed the right dial content (cogs+date+battery / Citizen chronograph replica / Batman face with
+subdials+weather). A 4th file (`2151.bmp`, from visiting a 4th/custom face) was also retrieved but
+never re-captured post-fix (still the old corrupt version) - user doesn't care about it.
+
+**Added a "Screengrabber" on/off switch**, in the settings screen directly under "Extreme Power
+Save" (`ui_screengrabberPanel`/`Switch`/`Label`/`Icon` in `src/ui/ui.c`, cloned from the
+`ui_extremePowerSavePanel` block right above it, same `#if ESPS3_2_06` gate, camera icon via the
+already-existing `ui_img_camera_png` asset). Backed by `screengrabberEnabled`
+(`hal/esp32/app_hal.cpp`), persisted via `prefs` key `"screengrab"`, **defaults to true** (preserves
+the already-shipped always-on behavior rather than silently turning the feature off for existing
+users). `save_dial_screengrab()` checks the flag first and returns immediately when off, so
+disabling it fully removes the capture cost - motivated by the user noticing the dial-selector
+open now takes a noticeable ~15s longer with a capture happening (not yet root-caused/measured
+which part - `lv_snapshot_take()`'s software render of the whole 410x502 dial tree, or the ~618KB
+buffered small-chunk FFat write - is the larger contributor; worth profiling if this needs to get
+faster rather than just toggle-off-able).
+
+Flashed and boot-confirmed on real hardware (`Setup FS success`, `Flash: Total 7118848 => Used
+2486272` after the 4 stored grabs). The switch's on/off behavior itself (toggling it and confirming
+capture is actually skipped when off) has NOT yet been exercised on real hardware - next thing to
+verify, not yet a confirmed-working fact.

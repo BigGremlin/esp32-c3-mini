@@ -84,6 +84,11 @@ extern "C"
     extern lv_obj_t *ui_extremePowerSaveSwitch;
     extern lv_obj_t *ui_extremePowerSaveIcon;
     extern lv_obj_t *ui_extremePowerSavePanel;
+    void ui_event_screengrabberSwitch(lv_event_t *e);
+    extern lv_obj_t *ui_screengrabberLabel;
+    extern lv_obj_t *ui_screengrabberSwitch;
+    extern lv_obj_t *ui_screengrabberIcon;
+    extern lv_obj_t *ui_screengrabberPanel;
     void ui_event_settingsScreen(lv_event_t *e);
     extern lv_obj_t *ui_settingsScreen;
     extern lv_obj_t *ui_settingsList;

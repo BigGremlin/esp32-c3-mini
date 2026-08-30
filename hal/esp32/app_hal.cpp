@@ -148,6 +148,7 @@ bool updateSeconds = false;
 bool hasUpdatedSec = false;
 bool navSwitch = false;
 bool extremePowerSave = false;
+bool screengrabberEnabled = true;
 #if ESPS3_2_06
 // Cached the same way as the 30s battery-percent poll further down (and for
 // the same reason): staying_on_for_charging() calls this on every single
@@ -1458,6 +1459,19 @@ void onExtremePowerSave(lv_event_t *e)
   prefs.putBool("extremepwr", extremePowerSave);
 }
 
+// Lets the dial screengrab (save_dial_screengrab(), called from
+// on_watchface_list_open()) be switched off - it noticeably delays opening
+// the dial selector (~115-620KB lv_snapshot_take() render + BMP write), so
+// off should be a real option for anyone who doesn't want that cost on every
+// long-press.
+void onScreengrabberChange(lv_event_t *e)
+{
+  lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+  screengrabberEnabled = lv_obj_has_state(obj, LV_STATE_CHECKED);
+
+  prefs.putBool("screengrab", screengrabberEnabled);
+}
+
 void savePrefInt(const char *key, int value)
 {
   prefs.putInt(key, value);
@@ -1573,6 +1587,11 @@ void onFaceSelected(lv_event_t *e)
 // away from ui_home.
 void save_dial_screengrab()
 {
+  if (!screengrabberEnabled)
+  {
+    return;
+  }
+
   lv_draw_buf_t *snap = lv_snapshot_take(ui_home, LV_COLOR_FORMAT_RGB565);
   if (!snap)
   {
@@ -1583,7 +1602,14 @@ void save_dial_screengrab()
   uint32_t w = snap->header.w;
   uint32_t h = snap->header.h;
   uint32_t stride = snap->header.stride;
-  uint32_t rowBytes = w * 3; // 24bpp BMP; 240px rows are already 4-byte aligned
+  uint32_t pixelBytes = w * 3;
+  // BMP rows are padded to a 4-byte boundary per the spec, regardless of
+  // what the header's own biSizeImage/file-size fields say - most decoders
+  // compute the stride themselves from width/bpp rather than trusting those
+  // fields. This board's real display is 410x502 (not the 240x240 assumed
+  // when this was first written), and 410*3=1230 isn't 4-byte aligned, so
+  // skipping padding silently produced corrupt/truncated-looking files.
+  uint32_t rowBytes = (pixelBytes + 3) & ~3u;
   uint32_t imageSize = rowBytes * h;
 
   // Filename starts with the dial's own name, so each dial overwrites only
@@ -1616,7 +1642,7 @@ void save_dial_screengrab()
   file.write(fileHeader, sizeof(fileHeader));
   file.write(infoHeader, sizeof(infoHeader));
 
-  uint8_t *row = (uint8_t *)malloc(rowBytes);
+  uint8_t *row = (uint8_t *)calloc(1, rowBytes); // zeroed once; padding bytes at the tail are never touched again
   if (!row)
   {
     Timber.w("save_dial_screengrab: no memory for row buffer");
@@ -2115,10 +2141,91 @@ void btn_home_handler(Button2 &btn)
 }
 #endif
 
+// Set while handleSerialCommands() is streaming raw file bytes out over
+// Serial, so logCallback() doesn't interleave log text into the middle of
+// that byte stream. Doesn't cover the scattered direct Serial.print() calls
+// elsewhere in this file (btn_home_handler etc.) - fine for a manual,
+// deliberate one-off retrieval with no button presses mid-transfer, but not
+// a general-purpose fix.
+static bool serialDumpActive = false;
+
 void logCallback(timber_level_t level, uint32_t ts, const char *message)
 {
-  Serial.print(message);
+  if (!serialDumpActive)
+  {
+    Serial.print(message);
+  }
   Serial1.print(message);
+}
+
+// Minimal ad hoc retrieval path for pulling files (currently: dial
+// screengrab .bmp's) off FFat over the same USB-CDC serial link used for
+// flashing, since this codebase has no other host<-watch download path yet
+// (see save_dial_screengrab()'s own comment - the phone-app BLE protocol
+// only ever receives custom-face uploads, never sends files back). Meant as
+// a temporary manual tool, not a permanent feature - revisit if a real
+// transfer mechanism gets built later.
+//
+// Protocol (text commands, newline-terminated):
+//   LIST            -> one "NAME:<name> SIZE:<bytes>" line per file, then "LISTEND"
+//   GET:<filename>  -> "BEGIN:<filename>:<size>" then exactly <size> raw
+//                      bytes, then "END:<filename>"; or "ERR:NOFILE" if
+//                      missing.
+void handleSerialCommands()
+{
+  if (!Serial.available())
+  {
+    return;
+  }
+
+  String cmd = Serial.readStringUntil('\n');
+  cmd.trim();
+
+  if (cmd == "LIST")
+  {
+    File root = FLASH.open("/");
+    File file = root.openNextFile();
+    while (file)
+    {
+      if (!file.isDirectory())
+      {
+        Serial.printf("NAME:%s SIZE:%u\n", file.name(), (unsigned)file.size());
+      }
+      file = root.openNextFile();
+    }
+    Serial.println("LISTEND");
+  }
+  else if (cmd.startsWith("GET:"))
+  {
+    String name = cmd.substring(4);
+    String path = name.startsWith("/") ? name : "/" + name;
+    File file = FLASH.open(path, FILE_READ);
+    if (!file)
+    {
+      Serial.println("ERR:NOFILE");
+      return;
+    }
+
+    size_t size = file.size();
+    serialDumpActive = true;
+    Serial.printf("BEGIN:%s:%u\n", name.c_str(), (unsigned)size);
+    Serial.flush();
+
+    uint8_t buf[512];
+    size_t remaining = size;
+    while (remaining > 0)
+    {
+      size_t chunk = remaining < sizeof(buf) ? remaining : sizeof(buf);
+      file.read(buf, chunk);
+      Serial.write(buf, chunk);
+      remaining -= chunk;
+    }
+    Serial.flush();
+    file.close();
+    serialDumpActive = false;
+
+    Serial.printf("\nEND:%s\n", name.c_str());
+  }
 }
 
 // void lv_log_register_print_cb(lv_log_print_g_cb_t print_cb) {
@@ -2386,6 +2493,7 @@ void hal_setup()
   alertSwitch = prefs.getBool("alerts", false);
   navSwitch = prefs.getBool("autonav", false);
   extremePowerSave = prefs.getBool("extremepwr", false);
+  screengrabberEnabled = prefs.getBool("screengrab", true);
 
   lv_obj_scroll_to_y(ui_settingsList, 1, LV_ANIM_ON);
   lv_obj_scroll_to_y(ui_appList, 1, LV_ANIM_ON);
@@ -2437,6 +2545,15 @@ void hal_setup()
   else
   {
     lv_obj_remove_state(ui_extremePowerSaveSwitch, LV_STATE_CHECKED);
+  }
+
+  if (screengrabberEnabled)
+  {
+    lv_obj_add_state(ui_screengrabberSwitch, LV_STATE_CHECKED);
+  }
+  else
+  {
+    lv_obj_remove_state(ui_screengrabberSwitch, LV_STATE_CHECKED);
   }
 #endif
 
@@ -2567,6 +2684,8 @@ void hal_setup()
 
 void hal_loop()
 {
+  handleSerialCommands();
+
 #if ESPS3_2_06
   if (extremePowerSave && touchAsleep && bleAsleep && on_battery())
   {

@@ -95,6 +95,11 @@ lv_obj_t *ui_extremePowerSaveLabel;
 lv_obj_t *ui_extremePowerSaveSwitch;
 lv_obj_t *ui_extremePowerSaveIcon;
 lv_obj_t *ui_extremePowerSavePanel;
+void ui_event_screengrabberSwitch(lv_event_t *e);
+lv_obj_t *ui_screengrabberLabel;
+lv_obj_t *ui_screengrabberSwitch;
+lv_obj_t *ui_screengrabberIcon;
+lv_obj_t *ui_screengrabberPanel;
 
 void ui_event_timeoutSelect(lv_event_t *e);
 lv_obj_t *ui_timeoutSelect;
@@ -1015,6 +1020,22 @@ void ui_event_extremePowerSaveSwitch(lv_event_t *e)
       if (event_code == LV_EVENT_VALUE_CHANGED)
       {
             onExtremePowerSave(e);
+      }
+}
+
+void ui_event_screengrabberSwitch(lv_event_t *e)
+{
+      lv_disp_t *display = lv_display_get_default();
+      lv_obj_t *actScr = lv_display_get_screen_active(display);
+      if (actScr != ui_settingsScreen)
+      {
+            return;
+      }
+      lv_event_code_t event_code = lv_event_get_code(e);
+      lv_obj_t *target = lv_event_get_target(e);
+      if (event_code == LV_EVENT_VALUE_CHANGED)
+      {
+            onScreengrabberChange(e);
       }
 }
 
@@ -3125,6 +3146,47 @@ void ui_settingsScreen_screen_init(void)
       lv_obj_set_x(ui_extremePowerSaveLabel, 54);
       lv_obj_set_y(ui_extremePowerSaveLabel, 3);
       lv_label_set_text(ui_extremePowerSaveLabel, "Extreme Power Save");
+
+      ui_screengrabberPanel = lv_obj_create(ui_settingsList);
+      lv_obj_set_width(ui_screengrabberPanel, 200);
+      lv_obj_set_height(ui_screengrabberPanel, 64);
+      lv_obj_set_align(ui_screengrabberPanel, LV_ALIGN_CENTER);
+      lv_obj_remove_flag(ui_screengrabberPanel, LV_OBJ_FLAG_SCROLLABLE); /// Flags
+      lv_obj_set_style_radius(ui_screengrabberPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_bg_color(ui_screengrabberPanel, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_bg_opa(ui_screengrabberPanel, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_border_color(ui_screengrabberPanel, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_border_opa(ui_screengrabberPanel, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_border_width(ui_screengrabberPanel, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_border_side(ui_screengrabberPanel, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_pad_left(ui_screengrabberPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_pad_right(ui_screengrabberPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_pad_top(ui_screengrabberPanel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_pad_bottom(ui_screengrabberPanel, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+      ui_screengrabberIcon = lv_image_create(ui_screengrabberPanel);
+      lv_image_set_src(ui_screengrabberIcon, &ui_img_camera_png);
+      lv_obj_set_width(ui_screengrabberIcon, LV_SIZE_CONTENT);  /// 1
+      lv_obj_set_height(ui_screengrabberIcon, LV_SIZE_CONTENT); /// 1
+      lv_obj_set_x(ui_screengrabberIcon, -74);
+      lv_obj_set_y(ui_screengrabberIcon, 2);
+      lv_obj_set_align(ui_screengrabberIcon, LV_ALIGN_CENTER);
+      lv_obj_add_flag(ui_screengrabberIcon, LV_OBJ_FLAG_ADV_HITTEST);   /// Flags
+      lv_obj_remove_flag(ui_screengrabberIcon, LV_OBJ_FLAG_SCROLLABLE); /// Flags
+      lv_image_set_scale(ui_screengrabberIcon, 150);
+
+      ui_screengrabberSwitch = lv_switch_create(ui_screengrabberPanel);
+      lv_obj_set_width(ui_screengrabberSwitch, 50);
+      lv_obj_set_height(ui_screengrabberSwitch, 25);
+      lv_obj_set_x(ui_screengrabberSwitch, 57);
+      lv_obj_set_y(ui_screengrabberSwitch, 29);
+
+      ui_screengrabberLabel = lv_label_create(ui_screengrabberPanel);
+      lv_obj_set_width(ui_screengrabberLabel, LV_SIZE_CONTENT);  /// 1
+      lv_obj_set_height(ui_screengrabberLabel, LV_SIZE_CONTENT); /// 1
+      lv_obj_set_x(ui_screengrabberLabel, 54);
+      lv_obj_set_y(ui_screengrabberLabel, 3);
+      lv_label_set_text(ui_screengrabberLabel, "Screengrabber");
 #endif
 
       ui_rotatePanel = lv_obj_create(ui_settingsList);
@@ -3450,6 +3512,7 @@ void ui_settingsScreen_screen_init(void)
 #endif
 #if ESPS3_2_06
       lv_obj_add_event_cb(ui_extremePowerSaveSwitch, ui_event_extremePowerSaveSwitch, LV_EVENT_ALL, NULL);
+      lv_obj_add_event_cb(ui_screengrabberSwitch, ui_event_screengrabberSwitch, LV_EVENT_ALL, NULL);
 #endif
       lv_obj_add_event_cb(ui_timeoutSelect, ui_event_timeoutSelect, LV_EVENT_ALL, NULL);
       lv_obj_add_event_cb(ui_rotateSelect, ui_event_rotateSelect, LV_EVENT_ALL, NULL);
