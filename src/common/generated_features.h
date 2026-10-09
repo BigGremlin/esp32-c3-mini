@@ -56,6 +56,7 @@
 #include "../faces/batman_410/b_w_resized/b_w_resized.h"
 #include "../faces/174_410/174_410.h"
 #include "../faces/174/174.h"
+#include "../faces/classic24_410/classic24_410.h"
 #include "../faces/elecrow/elecrow.h"
 #include "../faces/classic_410/classic_410.h"
 #include "../faces/night_360/night_360.h"
