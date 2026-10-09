@@ -2427,7 +2427,10 @@ void hal_setup()
   // DMA-requiring allocations (BLE/WiFi/display driver buffers) are unaffected - those request
   // MALLOC_CAP_DMA explicitly, which PSRAM can't satisfy, so they still always land internal
   // regardless of this setting.
-  heap_caps_malloc_extmem_enable(128);
+  // 2026-10-09: 128 -> 32. Adding classic24_410 (a second widget-built Classic face) pushed
+  // free internal heap from ~12KB down to ~6KB and "BLE_INIT: Malloc failed" came back on
+  // boot - its 32-127 byte widget/style allocations were still landing internal.
+  heap_caps_malloc_extmem_enable(32);
 #endif
 
   Serial.begin(115200); /* prepare for possible serial debug */
